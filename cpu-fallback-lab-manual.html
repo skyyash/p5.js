@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CPU Fallback Lab Manual — Rebuild It Yourself</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --card: #ffffff;
+    --ink: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #0a66ff;
+    --good: #1a7f37;
+    --bad: #cf222e;
+    --warn: #9a6700;
+    --line: #e5e5ea;
+    --code: #f2f3f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    margin: 0;
+    line-height: 1.6;
+  }
+  header { background: #101014; color: #fff; padding: 28px 24px 20px; }
+  header h1 { margin: 0 0 6px; font-size: 24px; }
+  header p { margin: 4px 0; color: #c7c7cc; font-size: 14px; }
+  header code { background: #2c2c2e; padding: 1px 6px; border-radius: 4px; }
+  #progresswrap {
+    position: sticky; top: 0; z-index: 10;
+    background: var(--card); border-bottom: 1px solid var(--line);
+    padding: 10px 24px;
+  }
+  #navbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  #navbar button {
+    border: 1px solid var(--line); background: var(--card); border-radius: 999px;
+    padding: 4px 12px; font-size: 13px; cursor: pointer;
+  }
+  #navbar button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+  #navbar button.done { border-color: var(--good); color: var(--good); }
+  #bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  #barfill { height: 100%; width: 0%; background: var(--good); transition: width .3s; }
+  #barlabel { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 24px 120px; }
+  section.card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; margin: 20px 0;
+  }
+  section.card h2 { margin-top: 0; font-size: 20px; }
+  section.card h3 { font-size: 16px; margin-bottom: 4px; }
+  .tag {
+    display: inline-block; font-size: 12px; background: #eef4ff; color: var(--accent);
+    border-radius: 4px; padding: 1px 8px; margin: 2px 4px 2px 0; font-family: ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-size: 13px;
+  }
+  .revealbox {
+    border: 1px dashed var(--accent); border-radius: 8px; padding: 12px 14px;
+    margin: 14px 0; background: #f7faff;
+  }
+  .revealbox button, .navbtn {
+    border: 1px solid var(--accent); background: #fff; color: var(--accent);
+    border-radius: 8px; padding: 6px 14px; font-size: 14px; cursor: pointer; margin: 4px 6px 4px 0;
+  }
+  .revealbox button:hover, .navbtn:hover { background: #eef4ff; }
+  .answer { display: none; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .answer.show { display: block; }
+  .hint { border-left: 3px solid var(--warn); padding: 2px 0 2px 12px; margin: 10px 0; }
+  .takeaway {
+    background: #f0f9f1; border: 1px solid #bfe3c6; border-radius: 8px;
+    padding: 10px 14px; margin: 14px 0; font-size: 14px;
+  }
+  .verify {
+    background: #fff8e6; border: 1px solid #f0d48a; border-radius: 8px;
+    padding: 10px 14px; margin: 14px 0; font-size: 14px;
+  }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin-top: 16px; font-size: 14px; }
+  .prevnext { display: flex; justify-content: space-between; margin-top: 18px; }
+  ol.tasks > li { margin-bottom: 14px; }
+  .foot { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CPU Fallback Lab Manual — Rebuild It Yourself</h1>
+  <p>Derived backwards from <code>feat/cpu-fallback-compute</code>. Start on a clean checkout of <code>upstream/main</code> and rebuild the whole feature lab by lab.</p>
+  <p>Rule per lab: read first, write second, verify third. When it breaks (it will), read the <em>When it breaks</em> box last, not first.</p>
+</header>
+
+<div id="progresswrap">
+  <div id="navbar"></div>
+  <div id="bar"><div id="barfill"></div></div>
+  <div id="barlabel"></div>
+</div>
+
+<main>
+<!-- ============ LAB 0 ============ -->
+<section class="card" id="lab0" data-title="Lab 0 · Setup + red">
+  <h2>Lab 0 · Workbench and first red</h2>
+  <p><span class="tag">goal</span> A branch, a passing baseline, and one failing test that proves the gap.</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li>Create your lab branch from upstream tip:
+<pre>git fetch upstream main
+git checkout -b lab/cpu-fallback upstream/main</pre></li>
+    <li>Confirm the baseline builds and the WebGL suite passes:
+<pre>npm run build
+npx vitest run test/unit/webgl/p5.RendererGL.js --project unit-tests</pre>
+      Expect 191 passed. If this fails, fix your environment before continuing — nothing else will make sense on a broken bench.</li>
+    <li>Create <code>test/unit/webgl/cpuComputeFallback.js</code> with the standard harness (instance in <code>beforeEach</code>, canvas <strong>inside <code>setup()</code></strong> — see the trap below), and write exactly one test: <code>createStorage([1,2,3])</code> on a WEBGL canvas. Run just your file and watch it go red with <code>only available with the WebGPU renderer</code>.</li>
+  </ol>
+  <div class="revealbox"><strong>⏸ Harness trap:</strong> your first version will likely create the canvas in <code>beforeEach</code> and see a <code>Renderer2D</code> in tests. Why?
+    <br><button>Reveal</button>
+    <div class="answer">p5 installs a <strong>default P2D canvas during async startup</strong> (<code>#_setup</code> in <code>src/core/main.js</code>), which <em>replaces</em> anything created before it finishes. The repo's own tests create canvases per-test (after async hook boundaries) for exactly this reason. Canonical fix: create the canvas inside the sketch's <code>setup()</code>, which runs after the default exists.</div>
+  </div>
+  <div class="verify"><strong>Done when:</strong> baseline green, your one test red with the WebGPU-only error. Read <code>src/core/p5.Renderer3D.js</code> guards (<code>createStorage</code>, <code>buildComputeShader</code>, <code>compute</code>) and note the shared shape: <em>throw unless the renderer implements it</em>. That shape is your whole assignment: implement it on the renderer.</div>
+  <label class="check"><input type="checkbox" data-stop="lab0"> Baseline green, one red test, and I can explain the harness trap.</label>
+  <div class="prevnext"><span></span><button class="navbtn" data-goto="lab1">Next →</button></div>
+</section>
+
+<!-- ============ LAB 1 ============ -->
+<section class="card" id="lab1" data-title="Lab 1 · CPU storage">
+  <h2>Lab 1 · CPU storage mirror</h2>
+  <p><span class="tag">goal</span> <code>createStorage</code> works on WebGL. <span class="tag">read</span> <code>RendererWebGPU.createStorage</code> + <code>StorageBuffer</code> constructor.</p>
+  <h3>Do (in this order — do not skip ahead)</h3>
+  <ol class="tasks">
+    <li><strong>1a — numbers.</strong> Add <code>CpuStorageBuffer</code> (fields: <code>_isStorageBuffer = true</code>, <code>data</code>, <code>length</code>, <code>_schema</code>, <code>_arrayType</code>) and <code>RendererGL.createStorage</code> handling only <code>number</code> → zero-filled <code>Float32Array</code> and float arrays (copy, never alias). Add <code>update</code>, <code>read</code> (copies!), <code>set</code> with bounds checks. Test: lengths, read-back values, <code>update</code> then <code>set</code>.</li>
+    <li><strong>1b — structs.</strong> For arrays of objects, store them as-is and infer a schema. Required shape per field: <code>{name, dim, kind}</code> where kind is <code>number | array | vector | color</code>.
+      <div class="revealbox"><strong>⏸ Stuck on the schema shape?</strong> First try the "obvious" <code>{fields: ['position', …]}</code>, run a struct test, and read the crash before revealing.
+        <br><button>Reveal model answer</button>
+        <div class="answer"><pre>function inferCpuStructSchema(firstElement) {
+  const fields = Object.entries(firstElement).map(([name, value]) => {
+    if (typeof value === 'number') return { name, dim: 1, kind: 'number' };
+    if (Array.isArray(value)) return { name, dim: value.length, kind: 'array' };
+    if (value?.isVector) return { name, dim: value.dimensions ?? 3, kind: 'vector' };
+    if (value?.isColor) return { name, dim: 4, kind: 'color' };
+    throw new Error(`createStorage() field "${name}" must be a number, an array of numbers, a p5.Vector or a p5.Color.`);
+  });
+  return { fields };
+}</pre>
+        The strings-only version breaks because <code>createStructArrayElementProxy</code> (<code>ir_builders.js</code>) builds one getter per field using <code>field.name</code> and sizes IR nodes with <code>field.dim</code>. With strings, no getter exists, <code>d[i].position</code> is <code>undefined</code> at record time, and <code>primitiveConstructorNode</code> crashes on <code>a.isStrandsNode</code>.</div>
+      </div>
+    </li>
+    <li><strong>1c — lists.</strong> Add <code>CpuStorageList</code> (<code>maxCapacity</code>, <code>items</code>, <code>length</code> getter, <code>push</code>/<code>pop</code>/<code>clear</code>/<code>update</code>/<code>read</code>) and <code>createStorageList</code> mirroring the WebGPU branching (struct array → schema + items; plain object → schema only; empty → float list).</li>
+  </ol>
+  <div class="verify"><strong>Done when:</strong> count/array/typed/struct storage plus float and struct lists round-trip through <code>read</code>/<code>update</code>/<code>set</code>/<code>push</code>/<code>clear</code>, overflows throw, and reads return copies. Key file to compare against afterwards: the final <code>CpuStorageBuffer</code>/<code>CpuStorageList</code> in <code>p5.RendererGL.js</code>.</div>
+  <div class="takeaway"><strong>Takeaway:</strong> everything downstream keys off duck-type flags (<code>_isStorageBuffer</code>, <code>_schema</code>), not classes. Get the flags right and <code>uniformStorage()</code> accepts your objects untouched.</div>
+  <label class="check"><input type="checkbox" data-stop="lab1"> Storage round-trips green, and I can explain the schema crash.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab0">← Prev</button><button class="navbtn" data-goto="lab2">Next →</button></div>
+</section>
+
+<!-- ============ LAB 2 ============ -->
+<section class="card" id="lab2" data-title="Lab 2 · Base compute shader">
+  <h2>Lab 2 · Make <code>buildComputeShader</code> stop throwing</h2>
+  <p><span class="tag">goal</span> <code>buildComputeShader(() =&gt; {})</code> returns on WebGL. <span class="tag">read</span> <code>RendererWebGPU.baseComputeShader</code>, the <code>Shader</code> constructor's compute detection, and both hook-type parsers.</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li>Add <code>RendererGL.baseComputeShader()</code> returning <code>new Shader(this, 'void main() {}', {compute: {'void iteration': '(ivec3 index) {}'}})</code>. The source is never compiled on this path; it only gives <code>modify()</code> hook type information.</li>
+    <li>Fix <code>getShaderHookTypes</code> in <code>shaderHookUtils.js</code> to also search <code>hooks.compute</code> (4 lines, mirrors WebGPU).</li>
+    <li>Verify <code>shader.hookTypes('void iteration')</code> resolves instead of throwing <code>Can't find hook</code>.</li>
+  </ol>
+  <div class="revealbox"><strong>⏸ Predict first:</strong> why must our hook say <code>(ivec3 index)</code> when WebGPU's says <code>(index: vec3&lt;i32&gt;)</code>?
+    <br><button>Reveal</button>
+    <div class="answer">Two parsers, two languages. The WebGL one splits parameters on whitespace as <code>type name</code>; WebGPU's splits on <code>:</code> as <code>name: type</code>. Feed ours the WGSL spelling and it reads type <code>index:</code> — garbage in, garbage out. If you hit this wall, you now know exactly which file to open.</div>
+  </div>
+  <div class="verify"><strong>Done when:</strong> no more <code>only available with WebGPU</code> from <code>buildComputeShader</code>; the failure (if any) moved deeper into <code>modify</code>, which is progress. Deliberately do <em>not</em> touch <code>compute()</code> yet.</div>
+  <label class="check"><input type="checkbox" data-stop="lab2"> I can explain both fixes and the spelling difference.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab1">← Prev</button><button class="navbtn" data-goto="lab3">Next →</button></div>
+</section>
+
+<!-- ============ LAB 3 ============ -->
+<section class="card" id="lab3" data-title="Lab 3 · First compute">
+  <h2>Lab 3 · Stash the IR, run one hardcoded op</h2>
+  <p><span class="tag">goal</span> <code>compute()</code> runs <code>d[i] = d[i] + 1</code> on the CPU. <span class="tag">read</span> <code>p5.strands.js modify()</code> (3 phases), <code>ir_types.js</code> node/opcodes.</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li>In <code>modify()</code>, after <code>generateShaderCode</code>, stash <code>{dag, cfg, uniforms, hooks}</code> on the returned shader — <strong>compute shaders only</strong>. Everything else must behave byte-identically.</li>
+    <li>Add <code>RendererGL.compute(shader, x, y, z)</code> that finds the first storage uniform and runs a hardcoded <code>+1</code> loop. Test <code>[1,2,3] → [2,3,4]</code>.</li>
+    <li>Dump one real IR (log <code>nodeTypes/opCodes/dependsOn</code> for the doubling shader). Find the read node, the write-target node, the multiply, and the assignment. Notice read and write are <em>different nodes with the same inputs</em> — values vs store locations need distinct identities.</li>
+  </ol>
+  <div class="takeaway"><strong>Takeaway (the big one):</strong> your callback body runs <strong>zero times</strong> as logic. Executing it only constructs IR nodes ("fake JS"). That is why looping over the callback could never work, and why every later lab reads the stashed IR instead.</div>
+  <div class="verify"><strong>Done when:</strong> the <code>+1</code> test passes and you can point at each of the 4 node kinds in the dump. The hardcoding is intentional scaffolding — Lab 6 removes it.</div>
+  <label class="check"><input type="checkbox" data-stop="lab3"> I can explain why the callback can't just be looped.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab2">← Prev</button><button class="navbtn" data-goto="lab4">Next →</button></div>
+</section>
+
+<!-- ============ LAB 4 ============ -->
+<section class="card" id="lab4" data-title="Lab 4 · Index + structs">
+  <h2>Lab 4 · Real index, struct fields</h2>
+  <p><span class="tag">goal</span> Replace the cheat with <code>index.x</code> and <code>data[i].position</code>. <span class="tag">read</span> <code>ir_builders.js</code> array access + struct proxy, <code>webgpu/shaders/compute.js</code> index mapping.</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li><strong>Index.</strong> Change the loop to compute <code>ix = flat % x</code> (plus <code>iy/iz</code> for later) and store <code>ix</code>. Test shader: <code>d[i] = index.x</code> on <code>[0,0,0]</code> → expect <code>[0,1,2]</code>. Rebuild before reloading (<code>index.html</code> loads the built bundle, not <code>src</code>).</li>
+    <li><strong>Structs.</strong> Branch on <code>buf._schema</code>: for struct items do component-wise <code>position += velocity</code> (mind <code>p5.Vector</code> vs plain arrays). Test one particle <code>(0,0)+(1,2) → (1,2)</code>.</li>
+    <li><strong>Look, don't leap.</strong> Log <code>dag.nodeTypes/opCodes/dependsOn</code> for both shaders and identify <code>ASSIGNMENT</code>, <code>ARRAY_ACCESS</code> (note <code>identifier: 'position'</code> on struct access), and <code>ADD</code>.</li>
+  </ol>
+  <div class="verify"><strong>Done when:</strong> float-index and struct-particle tests both pass. You still hardcode two shapes — Lab 5 adds two buffers and control flow, Lab 6 deletes all hardcoding.</div>
+  <label class="check"><input type="checkbox" data-stop="lab4"> Both tests green; I can read a struct access node.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab3">← Prev</button><button class="navbtn" data-goto="lab5">Next →</button></div>
+</section>
+
+<!-- ============ LAB 5 ============ -->
+<section class="card" id="lab5" data-title="Lab 5 · Two buffers + control flow">
+  <h2>Lab 5 · Game of Life, still hardcoded</h2>
+  <p><span class="tag">goal</span> Run the docs' blinker on CPU. <span class="tag">read</span> <code>Shader.setDefaultUniforms</code> (initializer resolution is the pattern to copy).</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li><strong>Resolve like the GPU path.</strong> At the top of <code>compute</code>: storage entries may be buffers <em>or functions returning them</em> — call functions. Same for scalar uniforms. Log the resolved names for a 4×4 test before doing any math.</li>
+    <li><strong>Threshold first (no loops).</strong> Shader: <code>if (cur[i] &gt; 0.5) nxt[i] = 1 else 0</code> on <code>[0, 0.8, 0.2]</code> → <code>[0, 1, 0]</code>.</li>
+    <li><strong>Blinker.</strong> Hardcode neighbor counting with wraparound on 4×4 (horizontal row → vertical column in one step). Compare against a hand-computed expectation.</li>
+  </ol>
+  <div class="revealbox"><strong>⏸ Two design questions before you continue:</strong> (1) when dispatch exceeds ~4096 items, cap or warn? (2) where must resolution happen for the <code>[a,b]=[b,a]</code> swap trick to keep working?
+    <br><button>Reveal</button>
+    <div class="answer">(1) <strong>Warn, never silently cap.</strong> Dropping invocations corrupts simulations that need every cell; reducing counts belongs visibly in examples/docs. (2) Resolution must happen <strong>per <code>compute()</code> call</strong> (like GPU uniforms), never cached across frames — the swap rebinds buffers between dispatches.</div>
+  </div>
+  <div class="verify"><strong>Done when:</strong> threshold and blinker pass. Notice the discomfort: every new shader needs a new hardcoded branch. That discomfort <em>is</em> Lab 6's motivation — say it out loud before continuing.</div>
+  <label class="check"><input type="checkbox" data-stop="lab5"> I can defend warn-don't-cap and per-dispatch resolution.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab4">← Prev</button><button class="navbtn" data-goto="lab6">Next →</button></div>
+</section>
+
+<!-- ================= LAB 6 ================= -->
+<section class="card" id="lab6" data-title="Lab 6 · Real interpreter">
+  <h2>Lab 6 · Delete the hardcoding: lower IR to JS once</h2>
+  <p><span class="tag">goal</span> One compiler handling every shader so far, in new file <code>src/strands/strands_jsBackend.js</code>. <span class="tag">read</span> <code>strands_glslBackend.js</code> end to end first — you will mirror it handler for handler.</p>
+  <h3>Do (smallest working slices — keep every previous test green throughout)</h3>
+  <ol class="tasks">
+    <li><strong>6a — expressions.</strong> Write <code>emitExpression</code> for <code>LITERAL</code>, <code>VARIABLE</code> (index → arg, stores → <code>__s</code>, scalars → <code>__u</code>, everything else → <code>__v</code> locals), <code>ARRAY_ACCESS</code>, <code>SWIZZLE</code>, <code>TERNARY</code>, binary ops via one <code>H.binop</code> helper (broadcasting, truncating int division, float <code>mod</code>), and <code>CONSTRUCTOR</code> via <code>H.vec</code>. Convert the <code>+1</code> test to use it.</li>
+    <li><strong>6b — statements and blocks.</strong> Mirror the GLSL <code>cfgHandlers</code>: default/branch/if/for/scope/merge, phi declare-in-branch plus assign-at-branch-ends, <code>for(init; cond; update)</code> from recorded header nodes. Convert threshold + blinker tests. Sort with the existing <code>sortCFG</code> from the hook entry block.</li>
+    <li><strong>6c — builtins and lists.</strong> One <code>H.call</code> dispatch (Math family, <code>mix</code>/<code>clamp</code>/<code>step</code>, vector ops), <code>random</code> as a seeded per-invocation hash (document: approximate, not bit-identical), <code>noise</code> via real <code>p5.noise</code> with detail save/restore, list <code>push/pop/length</code>, struct constructors from schema field order. Textures throw a clear error.</li>
+    <li><strong>6d — driver.</strong> <code>runCpuCompute</code>: reject non-compute shaders (same message as GPU), resolve stores/scalars, compile once and cache on the shader, warn past 4096, loop flat→<code>(x,y,z)</code> with fresh locals per invocation, bump all store versions after.</li>
+  </ol>
+  <div class="revealbox"><strong>⏸ You will hit at least two of these three; predict the fixes before revealing:</strong> (a) <code>let t = t</code> self-reference, (b) branch discovery silently doing nothing, (c) struct reads coming back empty.
+    <br><button>Reveal</button>
+    <div class="answer">(a) Record the temp name <em>after</em> emitting its expression — exactly the GLSL backend's ordering. (b) The sorted list is a <code>{blocks, types}</code> wrapper with no <code>.length</code>; comparisons against it are always false, so loops "never run" with zero errors. Use <code>sorted.blocks.length</code>. (c) Field descriptors need <code>dim</code> (Lab 1 comes back to haunt you) — thread it from schema through emission into the read helper.</div>
+  </div>
+  <div class="verify"><strong>Done when:</strong> every Lab 3–5 test passes with zero shader-specific branches in <code>compute</code>, plus <code>random</code>/<code>noise</code> smoke coverage. Compare your file against the reference implementation last, not first.</div>
+  <div class="takeaway"><strong>Takeaway:</strong> "lower once to JS" beats "interpret per invocation" because the GLSL backend already proved the emission order is a valid structured linearization — you get control flow for free by mirroring it.</div>
+  <label class="check"><input type="checkbox" data-stop="lab6"> All old tests green with no hardcoded ops.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab5">← Prev</button><button class="navbtn" data-goto="lab7">Next →</button></div>
+</section>
+
+<!-- ================= LAB 7 ================= -->
+<section class="card" id="lab7" data-title="Lab 7 · Render path">
+  <h2>Lab 7 · Let render shaders read CPU data</h2>
+  <p><span class="tag">goal</span> The docs' display patterns work unchanged on WebGL. <span class="tag">read</span> the sampler flow: <code>getTexture → uniform.texture → bindTextures → _updateTexture</code>, and the <code>_webGL2CompatibilityPrefix</code> (<code>#version 300 es</code>).</p>
+  <h3>Do</h3>
+  <ol class="tasks">
+    <li><strong>Pack.</strong> New <code>cpuStorageTexture.js</code>: fixed width 256 (coordinates need no extra uniforms), one texel per scalar, texel-aligned struct fields, dynamic <code>stride</code>/<code>count</code> uniforms for rebinding. Pure functions first — unit-test <code>pack</code> in Node, no browser needed.</li>
+    <li><strong>Upload.</strong> <code>CpuStorageTexture</code> with the <code>bindTexture()</code>/<code>update()</code> interface, cached per renderer, re-upload on version change.
+      <div class="revealbox"><strong>⏸ Deliberate trap (do this!):</strong> upload without touching pixel-store state, run a filter test, and observe all-black output with <strong>zero GL errors</strong>. Then reveal.
+        <br><button>Reveal</button>
+        <div class="answer">p5 leaves <code>UNPACK_PREMULTIPLY_ALPHA_WEBGL</code> on outside text drawing. Scalar lists pack values into red with alpha 0, so premultiplying zeroes the data on upload — silent corruption. Guard with save/set-false/restore around <code>texImage2D</code>. When the GPU pipeline is proven right piece by piece, suspect host-side state <em>around</em> the calls.</div>
+      </div>
+    </li>
+    <li><strong>Emit.</strong> In the GLSL backend: sampler + stride/count declarations for render-stage shaders only (compute-only shaders skip — their GLSL is never compiled), <code>texelFetch</code> reads, <code>length → (name_count)</code>, loud errors for <code>push/pop</code> in render shaders and for WebGL1 (no <code>texelFetch</code>; compute fallback still works there).</li>
+    <li><strong>Bind.</strong> <code>getTexture</code> override routes CPU storage to cached data textures; <code>_updateTexture</code> writes stride/count on the current program (locations cached per program); <code>instances()</code> sends CPU lists down <code>_instanceCount</code>.</li>
+    <li><strong>Prove it with pixels.</strong> Filter test: 4×4 cells, one alive cell, assert white <em>and</em> black pixels exist. Material test: per-instance struct positions with a <code>finalColor</code> override to pure red (unambiguous vs background), assert red exists.</li>
+  </ol>
+  <div class="verify"><strong>Done when:</strong> both pixel tests pass. If a render test fails, first check your <code>begin/end</code> pairing — a missing <code>end()</code> silently renders the <em>default</em> hook with no error, which looks exactly like "my feature is broken".</div>
+  <label class="check"><input type="checkbox" data-stop="lab7"> Pixel tests green; I can explain the premultiply trap.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab6">← Prev</button><button class="navbtn" data-goto="capstone">Next →</button></div>
+</section>
+
+<!-- ============ CAPSTONE ============ -->
+<section class="card" id="capstone" data-title="Capstone">
+  <h2>Capstone · The docs example, unchanged, on WebGL</h2>
+  <p>Run the bouncing-particles example (compute bounce + <code>buildGeometry</code> + <code>model</code> + <code>lights</code>) on a WEBGL canvas. Assert the simulation advanced (<code>read()</code> shows movement) and the frame draws without errors. Then run the full surrounding suites (<code>webgl</code> + <code>core</code>) and confirm the only failure, if any, also fails on clean <code>upstream/main</code> (stash-check it like the <code>param_errors.js</code> wording drift).</p>
+  <div class="verify"><strong>Done when:</strong> capstone green, suites green-minus-pre-existing, build + lint clean. You can now explain every line you would submit — which is the project's bar for authorship, not just a nice-to-have (see <code>AI_USAGE_POLICY.md</code>).</div>
+  <label class="check"><input type="checkbox" data-stop="capstone"> Capstone green; I own every line.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="lab7">← Prev</button><button class="navbtn" data-goto="dojo">Dojo →</button></div>
+</section>
+
+<!-- ============ DOJO ============ -->
+<section class="card" id="dojo" data-title="Debugging dojo">
+  <h2>Debugging dojo — five symptoms, you diagnose</h2>
+  <p>For each: state your hypothesis <em>before</em> opening hint 1, then hint 2, then the answer. These are the real failures from building this feature.</p>
+
+  <div class="revealbox"><strong>Case 1.</strong> Tests throw <code>only available with the WebGPU renderer</code> although the renderer <em>has</em> the method — and a probe in <code>beforeEach</code> agrees, while the test body sees <code>Renderer2D</code>.
+    <br><button>Hint 1</button>
+    <div class="answer">Something <em>replaces</em> the renderer between setup and test. What does p5 create during async startup?
+    <br><button>Hint 2</button>
+    <div class="answer" style="border:0;padding:0;">…a default P2D canvas (<code>#_setup</code>), which clobbers anything created before it finishes.
+    <br><button>Answer</button>
+    <div class="answer" style="border:0;padding:0;">Create canvases inside <code>setup()</code>. Lesson: right-object-here, wrong-object-there means <strong>lifecycle</strong>, not logic.</div></div></div>
+  </div>
+
+  <div class="revealbox"><strong>Case 2.</strong> Generated code throws <code>Cannot access '__t0' before initialization</code>.
+    <br><button>Hint 1</button>
+    <div class="answer">Read the first emitted declaration line literally. What does the right-hand side reference?
+    <br><button>Hint 2</button>
+    <div class="answer" style="border:0;padding:0;">Itself — the temp name was recorded <em>before</em> emitting, so lookup resolved to the name being defined.
+    <br><button>Answer</button>
+    <div class="answer" style="border:0;padding:0;">Emit first, name after — the GLSL backend's ordering. Lesson: compare against the reference implementation <em>operation by operation</em>.</div></div></div>
+  </div>
+
+  <div class="revealbox"><strong>Case 3.</strong> Branches and loops silently generate straight-line code — no errors anywhere.
+    <br><button>Hint 1</button>
+    <div class="answer">The discovery loops "never run". What do they iterate over, and does that object have the property they test?
+    <br><button>Hint 2</button>
+    <div class="answer" style="border:0;padding:0;">They test <code>sorted.length</code> on a <code>{blocks, types}</code> wrapper — <code>undefined</code>, so every comparison is false.
+    <br><button>Answer</button>
+    <div class="answer" style="border:0;padding:0;"><code>sorted.blocks.length</code>. Lesson: wrappers without <code>.length</code> fail open; prefer explicit shapes.</div></div></div>
+  </div>
+
+  <div class="revealbox"><strong>Case 4.</strong> Correct declarations, correct fetch, bound texture, uploaded data, zero GL errors — all-black output.
+    <br><button>Hint 1</button>
+    <div class="answer">Every GPU-side fact checks out. What host-side state touches the upload path?
+    <br><button>Hint 2</button>
+    <div class="answer" style="border:0;padding:0;">Pixel-store state: p5 leaves alpha-premultiplying on, and scalar data packs into red with alpha 0.
+    <br><button>Answer</button>
+    <div class="answer" style="border:0;padding:0;">Disable premultiply around the upload, restore after. Lesson: silent host-side corruption beats every GPU-side theory — isolate with a raw (non-strands) shader first.</div></div></div>
+  </div>
+
+  <div class="revealbox"><strong>Case 5.</strong> A filter test renders the <em>default</em> hook (passthrough) with no errors, after a long investigation of the transpiler, hooks, and codegen.
+    <br><button>Hint 1</button>
+    <div class="answer">Reproduce with the smallest possible input: does a constant-white filter work?
+    <br><button>Hint 2</button>
+    <div class="answer" style="border:0;padding:0;">Yes — so the framework is fine. Diff the working test against the failing one line by line.
+    <br><button>Answer</button>
+    <div class="answer" style="border:0;padding:0;">The failing test never called <code>filterColor.end()</code>, so the hook never finalized. Lesson: check <code>begin/end</code> pairing before theorizing — and always shrink the repro first.</div></div></div>
+  </div>
+
+  <label class="check"><input type="checkbox" data-stop="dojo"> I diagnosed 4/5 before the final answer.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="capstone">← Capstone</button><span></span></div>
+</section>
+</main>
+
+<script>
+(function () {
+  var stops = ['lab0','lab1','lab2','lab3','lab4','lab5','lab6','lab7','capstone','dojo'];
+  var nav = document.getElementById('navbar');
+  var barfill = document.getElementById('barfill');
+  var barlabel = document.getElementById('barlabel');
+  var checked = {};
+  try { checked = JSON.parse(localStorage.getItem('cpuFallbackLabProgress') || '{}'); } catch (e) { checked = {}; }
+  function save() {
+    try { localStorage.setItem('cpuFallbackLabProgress', JSON.stringify(checked)); } catch (e) {}
+  }
+  function refresh() {
+    var done = 0;
+    stops.forEach(function (id) {
+      var btn = document.querySelector('#navbar button[data-goto="' + id + '"]');
+      var isDone = !!checked[id];
+      if (isDone) done++;
+      if (btn) {
+        btn.classList.toggle('done', isDone);
+        btn.textContent = (isDone ? '✓ ' : '') + btn.getAttribute('data-label');
+      }
+    });
+    document.querySelectorAll('input[type="checkbox"][data-stop]').forEach(function (box) {
+      box.checked = !!checked[box.getAttribute('data-stop')];
+    });
+    barfill.style.width = Math.round((done / stops.length) * 100) + '%';
+    barlabel.textContent = done + ' / ' + stops.length + ' labs complete';
+  }
+  stops.forEach(function (id) {
+    var sec = document.getElementById(id);
+    var label = sec ? sec.getAttribute('data-title') : id;
+    var b = document.createElement('button');
+    b.setAttribute('data-goto', id);
+    b.setAttribute('data-label', label);
+    b.textContent = label;
+    b.addEventListener('click', function () { go(id); });
+    nav.appendChild(b);
+  });
+  function go(id) {
+    var el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.querySelectorAll('#navbar button').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-goto') === id);
+    });
+  }
+  document.addEventListener('click', function (e) {
+    var el = e.target.closest ? e.target.closest('button.navbtn[data-goto]') : null;
+    if (el) go(el.getAttribute('data-goto'));
+  });
+  document.querySelectorAll('.revealbox button').forEach(function (btn) {
+    if (btn.dataset.orig === undefined) btn.dataset.orig = btn.textContent;
+    btn.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      var sib = btn.nextElementSibling;
+      while (sib && !(sib.classList && sib.classList.contains('answer'))) {
+        sib = sib.nextElementSibling;
+      }
+      if (!sib) return;
+      if (sib.classList.contains('show')) {
+        sib.classList.remove('show');
+        btn.textContent = btn.dataset.orig;
+      } else {
+        sib.classList.add('show');
+        btn.textContent = 'Hide';
+      }
+    });
+  });
+  document.querySelectorAll('input[type="checkbox"][data-stop]').forEach(function (box) {
+    box.addEventListener('change', function () {
+      checked[box.getAttribute('data-stop')] = box.checked;
+      save();
+      refresh();
+    });
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') return;
+    var current = 0;
+    stops.forEach(function (id, i) {
+      var r = document.getElementById(id).getBoundingClientRect();
+      if (r.top < window.innerHeight * 0.4) current = i;
+    });
+    if (e.key === 'ArrowRight') go(stops[Math.min(stops.length - 1, current + 1)]);
+    if (e.key === 'ArrowLeft') go(stops[Math.max(0, current - 1)]);
+  });
+  refresh();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Particles Example: Why It Failed Before, Why It Works Now</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; background: #fafafa; color: #1d1d1f; margin: 0; line-height: 1.6; }
+  header { background: #101014; color: #fff; padding: 28px 24px; }
+  header h1 { margin: 0 0 6px; font-size: 22px; }
+  header p { margin: 4px 0; color: #c7c7cc; font-size: 14px; }
+  header code { background: #2c2c2e; padding: 1px 6px; border-radius: 4px; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 24px 80px; }
+  section.card { background: #fff; border: 1px solid #e5e5ea; border-radius: 12px; padding: 22px; margin: 18px 0; }
+  section.card h2 { margin-top: 0; font-size: 19px; }
+  .tag { display: inline-block; font-size: 12px; background: #eef4ff; color: #0a66ff; border-radius: 4px; padding: 1px 8px; margin: 2px 4px 2px 0; font-family: ui-monospace, monospace; }
+  pre { background: #f2f3f5; border: 1px solid #e5e5ea; border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 13px; }
+  .before { border-left: 4px solid #cf222e; padding: 4px 0 4px 14px; margin: 12px 0; }
+  .after { border-left: 4px solid #1a7f37; padding: 4px 0 4px 14px; margin: 12px 0; }
+  .diff { border-left: 4px solid #0a66ff; padding: 4px 0 4px 14px; margin: 12px 0; }
+  .before h4, .after h4, .diff h4 { margin: 0 0 4px; font-size: 14px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border: 1px solid #e5e5ea; padding: 6px 8px; text-align: left; }
+  th { background: #f2f3f5; }
+  .foot { color: #6e6e73; font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Particles Example: Before vs Now</h1>
+  <p>Sketch: 100 particles, compute moves them, material shader draws them. Branch <code>feat/cpu-fallback-compute</code>.</p>
+  <p>Before: WEBGPU-only. Any <code>WEBGL</code> run died at the first storage/compute call. Now: change one line to <code>createCanvas(100, 100, WEBGL)</code> and the same sketch runs on the CPU fallback.</p>
+</header>
+<main>
+
+<section class="card">
+  <h2>The sketch (typo fixed)</h2>
+  <p>Your snippet had <code>cos(angle)  speed</code>; it needs <code>*</code>. Full sketch below, numbered for the steps.</p>
+<pre> 1  let particles, computeShader, displayShader, instance;
+ 2  const numParticles = 100;
+ 3  async function setup() {
+ 4    await createCanvas(100, 100, WEBGL); // was WEBGPU
+ 5    particles = createStorage(makeParticles(width/2, height/2));
+ 6    computeShader = buildComputeShader(simulate);
+ 7    displayShader = buildMaterialShader(display);
+ 8    instance = buildGeometry(drawParticle);
+ 9  }
+10  function simulate() {
+11    let data = uniformStorage(particles);
+12    let idx = index.x;
+13    data[idx].position = data[idx].position + data[idx].velocity;
+14  }
+15  function display() {
+16    let data = uniformStorage(particles);
+17    worldInputs.begin();
+18    let pos = data[instanceID()].position;
+19    worldInputs.position.xy += pos - [width/2, height/2];
+20    worldInputs.end();
+21  }
+22  function draw() {
+23    if (frameCount % 60 === 0) particles.update(makeParticles(random(width), random(height)));
+24    compute(computeShader, numParticles);
+25    shader(displayShader);
+26    model(instance, numParticles);
+27  }</pre>
+  <p class="foot">Steps below follow execution order: storage, compute build, compute run, render build, render draw, per-frame update.</p>
+</section>
+
+<section class="card">
+  <h2>Step 1 · <code>createStorage(arrayOfStructs)</code> — line 5</h2>
+  <span class="tag">src/webgl/p5.RendererGL.js +339</span>
+  <div class="before"><h4>Before: threw immediately</h4><p><code>RendererGL</code> had no <code>createStorage</code>. It threw <code>WebGPU only</code>. Your <code>{position: Vector, velocity: Vector}</code> array never got stored.</p></div>
+  <div class="diff"><h4>Diff: <code>CpuStorageBuffer</code> + <code>inferCpuStructSchema</code></h4><p>New CPU twin of the GPU buffer. Holds struct rows as plain JS objects, numbers in typed arrays. Infers schema <code>{position: {dim:3, kind:'vector'}, velocity: {...}}</code> from the first element. Sets duck-type flags <code>_isStorageBuffer</code> and <code>_isCpuStorage</code> so <code>uniformStorage()</code> accepts it. <code>update/set/read</code> validate shape with <code>checkCpuStructShape</code> and bump <code>_cpuVersion</code>.</p></div>
+  <div class="after"><h4>Now</h4><p>Same call returns a CPU buffer with <code>.data</code> (your 100 objects), <code>.length = 100</code>, <code>._schema</code>. No GPU allocation.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 2 · <code>buildComputeShader(simulate)</code> — lines 6, 10-14</h2>
+  <span class="tag">src/webgl/shaderHookUtils.js +4</span> <span class="tag">src/webgl/p5.RendererGL.js baseComputeShader</span> <span class="tag">src/strands/p5.strands.js +17</span>
+  <div class="before"><h4>Before: two failures in a row</h4><p>1) <code>baseComputeShader()</code> did not exist on WebGL, so there was no shader with an <code>iteration</code> hook. 2) Even with one, <code>getShaderHookTypes</code> only looked in <code>hooks.vertex / hooks.fragment</code>, so it threw <code>Can't find hook iteration!</code>.</p></div>
+  <div class="diff"><h4>Diff 1: hook lookup searches <code>hooks.compute</code></h4><pre>if (!body) {
+  body = shader.hooks.compute[hookName];
+  fullSrc = shader._computeSrc;
+}</pre></div>
+  <div class="diff"><h4>Diff 2: <code>baseComputeShader()</code> provides the hook shape</h4><pre>new Shader(this, 'void main() {}', {
+  compute: { 'void iteration': '(ivec3 index) {}' }
+})</pre><p>Source is never compiled on the CPU path. It only gives <code>modify()</code> hook type info to record against.</p></div>
+  <div class="diff"><h4>Diff 3: stash the IR as <code>_cpuIR</code></h4><pre>const cpuIR = isComputeShader
+  ? { dag, cfg, uniforms: [...uniforms], hooks: [...hooks] }
+  : undefined;
+const modified = oldModify.call(this, hooksObject);
+if (cpuIR) modified._cpuIR = cpuIR;</pre><p><code>modify()</code> records math (<code>dag</code>), order (<code>cfg</code>), bindings (<code>uniforms</code>), entry blocks (<code>hooks</code>), generates GLSL it will never run, then keeps the graph on the shader before the context is wiped.</p></div>
+  <div class="after"><h4>Now</h4><p><code>simulate</code> records: <code>uniformStorage(particles)</code> pushes a storage uniform, <code>index.x</code> is the hook param, the read <code>data[idx].position</code> and write target <code>data[idx].position</code> become separate IR nodes feeding an ASSIGNMENT. Shader object carries <code>_cpuIR</code> forward to Step 4.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 3 · <code>uniformStorage(particles)</code> inside compute — line 11</h2>
+  <span class="tag">src/strands/strands_api.js +10</span>
+  <div class="before"><h4>Before: schema/type mismatch</h4><p><code>uniformStorage</code> expected GPU buffer fields (<code>_isStorageBuffer</code>, WGSL packing). A CPU object would fail checks or produce a uniform with no usable binding.</p></div>
+  <div class="diff"><h4>Diff: accept CPU buffers, record <code>arrayType</code></h4><p>Checks <code>value._isStorageList / value._schema / value._isStorageBuffer</code>, so <code>CpuStorageBuffer</code> passes the same path. Reads <code>value._arrayType.name</code> (<code>Float32Array</code> here) into <code>typeInfo.arrayType: 'float'|'int'|'uint'</code>. Structs here stay float.</p></div>
+  <div class="after"><h4>Now</h4><p>Pushes <code>{name, typeInfo: {baseType:'storage', schema, arrayType:'float'}, defaultValue: particles}</code>. The driver (next step) resolves <code>defaultValue</code> to the live buffer each <code>compute()</code>.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 4 · <code>compute(computeShader, 100)</code> — line 24</h2>
+  <span class="tag">src/strands/strands_jsBackend.js NEW (1161 lines)</span> <span class="tag">src/webgl/p5.RendererGL.js compute()</span>
+  <div class="before"><h4>Before: no such path</h4><p><code>RendererGL.compute</code> did not exist or threw. Even if called, there was no <code>_cpuIR</code> and no JS compiler, so the recorded graph was already discarded.</p></div>
+  <div class="diff"><h4>Diff: <code>compute()</code> delegates to <code>runCpuCompute(shader, x, y, z)</code></h4><p>Resolves stores (calls function initializers, applies <code>setUniform</code> overrides) and scalars once. Compiles the compute hook <em>once</em> via <code>compileCpuComputeHook()</code> into <code>fn(__idx, __s, __u, __v, H)</code> with <code>new Function</code>, cached as <code>shader._cpuComputeFn</code>. Loops <code>flat 0..99</code>, maps <code>flat -&gt; (x,y,z)</code>, calls the fn with fresh locals <code>{}</code> each time. Warns past 4096 items but runs all. Bumps every bound store <code>_cpuVersion</code> after, since kernel writes touch raw arrays directly.</p></div>
+  <div class="after"><h4>Now, for your kernel</h4><p>Each invocation runs roughly: <code>__s["data"].data[H.truncIndex(__idx[0])].position = H.binop(ADD, H.readFieldValue(...), H.readFieldValue(...))</code>. <code>H.readFieldValue</code> converts stored <code>p5.Vector</code> to <code>[x,y,z]</code>, math runs with GLSL semantics, <code>H.writeFieldValue</code> writes back into the same Vector. 100 iterations mutate the 100 objects in place.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 5 · <code>buildMaterialShader(display)</code> — lines 7, 15-21</h2>
+  <span class="tag">src/webgl/strands_glslBackend.js +125</span> <span class="tag">src/webgl/cpuStorageTexture.js NEW</span>
+  <div class="before"><h4>Before: render shader could not see storage</h4><p>GLSL backend emitted <code>data[...]</code> array syntax with no declaration behind it. Compile failed with undeclared identifier, or (earlier) a clear <code>uniformStorage in render shader unsupported</code> error. <code>data[instanceID()].position</code> had no translation.</p></div>
+  <div class="diff"><h4>Diff 1: declare each buffer as a data texture</h4><pre>uniform sampler2D data;
+uniform int data_stride;</pre><p>From <code>addStorageBufferBindingsToDeclarations()</code>. Only for shaders with vertex/fragment hooks. Compute-only shaders skip. WebGL1 errors clearly (needs <code>texelFetch</code>); compute still falls back.</p></div>
+  <div class="diff"><h4>Diff 2: reads become <code>texelFetch</code></h4><p><code>generateStorageRead()</code> turns <code>data[i].position</code> into <code>texelFetch(data, ivec2((t) % 256, (t) / 256), 0).rgb</code> where <code>t = i * data_stride + OFFSET</code>. Your schema <code>{position:vec3, velocity:vec3}</code> gives offsets <code>0, 1</code>, stride <code>2</code>, so position is texel <code>i*2</code> channels <code>.rgb</code>. Scalar int/uint reads get wrapped in <code>int()/uint()</code> via the Stop-3 <code>arrayType</code> field.</p></div>
+  <div class="diff"><h4>Diff 3: <code>CpuStorageTexture</code> uploads the bytes</h4><p>Packs each <code>p5.Vector</code> via <code>_getRGBA</code>/components into RGBA32F, width 256, <code>NEAREST</code> filtering. <code>getTexture(cpuBuffer)</code> routes to this cache; <code>_setCpuStorageLayoutUniforms</code> uploads <code>stride/count</code> per draw so rebinding works. Re-uploads only when <code>_cpuVersion</code> changed. Disables premultiplied-alpha around upload.</p></div>
+  <div class="after"><h4>Now</h4><p><code>display</code> compiles. <code>data[instanceID()]</code> reads the texel for that instance, <code>.position</code> selects the field offset, and <code>worldInputs.position.xy += pos - center</code> offsets each sphere.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 6 · <code>model(instance, numParticles)</code> — line 26</h2>
+  <span class="tag">src/webgl/3d_primitives.js +8</span>
+  <div class="before"><h4>Before: instancing assumed GPU lists</h4><p>Count-as-list always took the indirect <code>_instanceList</code> path, which needs a GPU count buffer. CPU lists have no such buffer.</p></div>
+  <div class="diff"><h4>Diff: branch on <code>_isCpuStorage</code></h4><pre>if (count._isCpuStorage) r._instanceCount = count.length;
+else r._instanceList = count;</pre></div>
+  <div class="after"><h4>Now</h4><p>Your call passes a number (<code>100</code>), so it takes the plain <code>_instanceCount</code> path as before. If you passed a CPU storage list, its synchronous <code>.length</code> is used the same way. Either way the vertex shader gets <code>gl_InstanceID 0..99</code> matching the 100 computed elements.</p></div>
+</section>
+
+<section class="card">
+  <h2>Step 7 · <code>particles.update(...)</code> per frame — line 23</h2>
+  <span class="tag">src/webgl/p5.RendererGL.js CpuStorageBuffer.update</span>
+  <div class="before"><h4>Before: no update to call</h4><p>No CPU buffer class, so respawning particles every 60 frames was impossible on WebGL.</p></div>
+  <div class="diff"><h4>Diff: validated CPU update</h4><p>Checks each new element matches <code>position:3,velocity:3</code> shape, rejects over-length arrays, copies with <code>.slice()</code>, bumps <code>_cpuVersion</code> so the data texture re-uploads next draw.</p></div>
+  <div class="after"><h4>Now</h4><p>Every 60 frames the 100 objects are replaced, version bumps, texture re-packs, next <code>compute()</code> integrates from the new spawn points. No shader rebuild needed.</p></div>
+</section>
+
+<section class="card">
+  <h2>File map</h2>
+  <table>
+    <tr><th>Step</th><th>Sketch line</th><th>Diff file</th></tr>
+    <tr><td>1 storage</td><td><code>createStorage(...)</code></td><td><code>src/webgl/p5.RendererGL.js</code> CpuStorageBuffer, infer/check schema</td></tr>
+    <tr><td>2 compute build</td><td><code>buildComputeShader(simulate)</code></td><td><code>shaderHookUtils.js</code>, <code>baseComputeShader</code>, <code>p5.strands.js</code> _cpuIR stash</td></tr>
+    <tr><td>3 binding</td><td><code>uniformStorage(particles)</code></td><td><code>src/strands/strands_api.js</code> arrayType</td></tr>
+    <tr><td>4 compute run</td><td><code>compute(shader, 100)</code></td><td><code>src/strands/strands_jsBackend.js</code> compile once, loop flat to xyz</td></tr>
+    <tr><td>5 render</td><td><code>buildMaterialShader(display)</code></td><td><code>strands_glslBackend.js</code> texelFetch, <code>cpuStorageTexture.js</code> pack/upload</td></tr>
+    <tr><td>6 draw</td><td><code>model(instance, 100)</code></td><td><code>src/webgl/3d_primitives.js</code> _isCpuStorage branch</td></tr>
+    <tr><td>7 respawn</td><td><code>particles.update(...)</code></td><td><code>CpuStorageBuffer.update</code> + version bump</td></tr>
+  </table>
+  <p class="foot">One line change to run the whole thing on WebGL: <code>createCanvas(100, 100, WEBGL)</code>. Everything else in the sketch is unchanged.</p>
+</section>
+
+</main>
+</body>
+</html>

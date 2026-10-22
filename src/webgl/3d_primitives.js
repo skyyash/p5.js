@@ -2721,10 +2721,16 @@ function primitives3D(p5, fn) {
 
     // Each wrapped method: set _instanceCount or _instanceList, call the method
     // with the correct context, clear both in finally so they never leak.
+    // CPU storage lists (WebGL fallback) have no GPU-side length, so the WebGL
+    // draw path uses the plain count instead.
     const wrap = (method, ctx = r) =>
       function (...args) {
         if (isList) {
-          r._instanceList = count;
+          if (count._isCpuStorage) {
+            r._instanceCount = count.length;
+          } else {
+            r._instanceList = count;
+          }
         } else {
           r._instanceCount = count;
         }

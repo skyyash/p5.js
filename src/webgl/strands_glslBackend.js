@@ -17,6 +17,8 @@ import {
 import { getNodeDataFromID, extractNodeTypeInfo } from '../strands/ir_dag';
 import * as FES from '../strands/strands_FES';
 import * as build from '../strands/ir_builders';
+import * as constants from '../core/constants';
+import { CPU_STORAGE_TEX_WIDTH } from './cpuStorageTexture';
 function shouldCreateTemp(dag, nodeID) {
   const nodeType = dag.nodeTypes[nodeID];
   if (nodeType !== NodeType.OPERATION) return false;
@@ -218,6 +220,35 @@ export const glslBackend = {
     }
     return primitiveTypeName;
   },
+  // Declares CPU storage buffers as data textures for render shaders, so
+  // `uniformStorage()` reads work on WebGL. Each buffer becomes a sampler
+  // plus `stride` (and `count`, for lists) uniforms describing the packed
+  // layout (see `cpuStorageTexture.js`). Compute-only shaders skip this: the
+  // CPU fallback runs them from the IR and never compiles the GLSL.
+  addStorageBufferBindingsToDeclarations(strandsContext) {
+    const usesRenderStage = strandsContext.hooks.some(
+      ({ shaderContext }) =>
+        shaderContext === 'vertex' || shaderContext === 'fragment'
+    );
+    if (!usesRenderStage) return;
+    if (strandsContext.renderer?.webglVersion !== constants.WEBGL2) {
+      FES.userError(
+        'unsupported feature',
+        'Reading `uniformStorage()` data from material or filter shaders ' +
+          'needs WebGL2, which supports data textures. Compute shaders ' +
+          '(`buildComputeShader()` and `compute()`) still run on the CPU fallback.'
+      );
+    }
+    for (const { name, typeInfo } of strandsContext.uniforms) {
+      if (typeInfo.baseType !== 'storage') continue;
+      const declaration =
+        `uniform sampler2D ${name};\n` +
+        `uniform int ${name}_stride;` +
+        (typeInfo.isStorageList ? `\nuniform int ${name}_count;` : '');
+      strandsContext.vertexDeclarations.add(declaration);
+      strandsContext.fragmentDeclarations.add(declaration);
+    }
+  },
   generateHookUniformKey(name, typeInfo) {
     return `${this.getTypeName(typeInfo.baseType, typeInfo.dimension)} ${name}`;
   },
@@ -374,6 +405,11 @@ export const glslBackend = {
           return `${T}(${deps.join(', ')})`;
         }
         if (node.opCode === OpCode.Nary.FUNCTION_CALL) {
+          const storageListCall = this.generateStorageListCall(
+            generationContext,
+            node
+          );
+          if (storageListCall !== null) return storageListCall;
           const functionArgs = node.dependsOn.map(arg =>
             this.generateExpression(generationContext, dag, arg)
           );
@@ -410,6 +446,12 @@ export const glslBackend = {
           return `${parentExpr}.${node.swizzle}`;
         }
         if (node.opCode === OpCode.Binary.ARRAY_ACCESS) {
+          const storageRead = this.generateStorageRead(
+            generationContext,
+            dag,
+            node
+          );
+          if (storageRead !== null) return storageRead;
           const [bufferID, indexID] = node.dependsOn;
           const bufferExpr = this.generateExpression(
             generationContext,
@@ -521,6 +563,89 @@ export const glslBackend = {
       }
     );
     return { id, dimension };
+  },
+
+  // Looks up the storage uniform behind an array access, if any.
+  storageInfoOf(generationContext, dag, bufferID) {
+    const buffer = getNodeDataFromID(dag, bufferID);
+    if (buffer.nodeType !== NodeType.VARIABLE || !buffer.identifier) {
+      return null;
+    }
+    const uniform = generationContext.strandsContext?.uniforms?.find(
+      ({ name }) => name === buffer.identifier
+    );
+    if (!uniform || uniform.typeInfo.baseType !== 'storage') return null;
+    return { name: buffer.identifier, typeInfo: uniform.typeInfo };
+  },
+
+  // Emits a data-texture fetch for a storage read in a render shader, or
+  // null when this access is not such a read (compute shaders keep the
+  // legacy output: their GLSL is never compiled on the CPU fallback path).
+  // Layout matches `cpuStorageTexture.js`: fixed texture width, one texel
+  // per scalar, texel-aligned fields, dynamic stride for rebinding.
+  generateStorageRead(generationContext, dag, node) {
+    if (generationContext.shaderContext === 'compute') return null;
+    const [bufferID, indexID] = node.dependsOn;
+    const info = this.storageInfoOf(generationContext, dag, bufferID);
+    if (!info) return null;
+    const index = `int(${this.generateExpression(generationContext, dag, indexID)})`;
+    const at = texel =>
+      `texelFetch(${info.name}, ivec2((${texel}) % ${CPU_STORAGE_TEX_WIDTH}, (${texel}) / ${CPU_STORAGE_TEX_WIDTH}), 0)`;
+    const wrapScalar = fetch => {
+      if (info.typeInfo.arrayType === 'int') return `int(${fetch}.r)`;
+      if (info.typeInfo.arrayType === 'uint') return `uint(${fetch}.r)`;
+      return `${fetch}.r`;
+    };
+    if (!node.identifier) {
+      return wrapScalar(at(`(${index})`));
+    }
+    const field = info.typeInfo.schema?.fields.find(
+      f => f.name === node.identifier
+    );
+    if (!field) {
+      return FES.internalError(
+        `Unknown storage field "${node.identifier}" in the CPU compute fallback.`
+      );
+    }
+    let offset = 0;
+    for (const candidate of info.typeInfo.schema.fields) {
+      if (candidate.name === field.name) break;
+      offset += Math.max(1, Math.ceil(candidate.dim / 4));
+    }
+    const base = `((${index}) * ${info.name}_stride + ${offset})`;
+    const channels = 'rgba';
+    if (field.dim === 1) {
+      return wrapScalar(at(base));
+    }
+    if (field.dim <= 4) {
+      return `${at(base)}.${channels.slice(0, field.dim)}`;
+    }
+    const parts = [];
+    for (let k = 0; k < field.dim; k++) {
+      parts.push(`${at(`(${base} + ${(k / 4) | 0})`)}.${channels[k % 4]}`);
+    }
+    return `${this.getTypeName(BaseType.FLOAT, field.dim)}(${parts.join(', ')})`;
+  },
+
+  // List length reads become a uniform in render shaders; appending from a
+  // render shader makes no sense and fails with a clear message instead.
+  generateStorageListCall(generationContext, node) {
+    if (generationContext.shaderContext === 'compute') return null;
+    if (node.identifier.startsWith('_p5_length_')) {
+      const listName = node.identifier.slice('_p5_length_'.length);
+      return `(${listName}_count)`;
+    }
+    if (
+      node.identifier.startsWith('_p5_push_') ||
+      node.identifier.startsWith('_p5_pop_')
+    ) {
+      return FES.userError(
+        'unsupported feature',
+        'Storage lists can only be appended to from compute shaders, not from ' +
+          'material or filter shaders.'
+      );
+    }
+    return null;
   },
 
   instanceIdReference() {

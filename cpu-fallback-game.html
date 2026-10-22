@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fallback Ops — You Are the CPU Fallback</title>
+<style>
+  :root {
+    --bg: #0e0e13; --card: #1a1a22; --ink: #f2f2f5; --muted: #a1a1aa;
+    --accent: #4da3ff; --good: #3fb950; --bad: #f85149; --warn: #d29922;
+    --line: #2e2e38;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--ink); margin: 0; line-height: 1.6;
+  }
+  header { padding: 22px 24px 12px; max-width: 860px; margin: 0 auto; }
+  header h1 { margin: 0 0 4px; font-size: 24px; }
+  header p { margin: 4px 0; color: var(--muted); font-size: 14px; }
+  header a { color: var(--accent); }
+  #hud {
+    max-width: 860px; margin: 0 auto; padding: 0 24px;
+    display: flex; gap: 18px; font-size: 14px; color: var(--muted);
+  }
+  #hud b { color: var(--ink); }
+  main { max-width: 860px; margin: 0 auto; padding: 16px 24px 120px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 24px; margin: 16px 0;
+  }
+  .card h2 { margin-top: 0; font-size: 19px; }
+  .card h2 .lvl { color: var(--accent); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: #101016; border: 1px solid var(--line); border-radius: 6px;
+  }
+  code { padding: 1px 6px; font-size: 13px; }
+  pre { padding: 12px 14px; overflow-x: auto; font-size: 13px; }
+  button {
+    border: 1px solid var(--accent); background: transparent; color: var(--accent);
+    border-radius: 8px; padding: 8px 18px; font-size: 15px; cursor: pointer; margin: 6px 8px 6px 0;
+  }
+  button:hover:not(:disabled) { background: #1c2f4d; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.big { font-size: 17px; padding: 10px 26px; }
+  input.num {
+    width: 80px; padding: 7px 9px; font-size: 15px; border-radius: 8px;
+    border: 1px solid var(--line); background: #101016; color: var(--ink); margin: 0 4px;
+  }
+  .opt {
+    display: block; width: 100%; text-align: left; margin: 8px 0;
+    border-color: var(--line); color: var(--ink);
+  }
+  .opt:hover:not(:disabled) { background: #23232e; border-color: var(--accent); }
+  .opt.good { border-color: var(--good); background: #14261a; }
+  .opt.bad { border-color: var(--bad); background: #2b1518; }
+  .msg { min-height: 28px; margin-top: 10px; font-size: 15px; }
+  .msg.good { color: var(--good); }
+  .msg.bad { color: var(--bad); }
+  .msg.info { color: var(--muted); }
+  #grid { display: grid; grid-template-columns: repeat(4, 52px); gap: 6px; margin: 14px 0; }
+  #grid button {
+    width: 52px; height: 52px; margin: 0; padding: 0;
+    border: 1px solid var(--line); border-radius: 8px; background: #101016;
+  }
+  #grid button.on { background: #e8e8ea; }
+  .streakfire { color: var(--warn); }
+  .hidden { display: none; }
+  .foot { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Fallback Ops — You Are the CPU Fallback</h1>
+  <p><strong>You are the CPU fallback.</strong> The GPU is offline. Execute compute shaders by hand across 5 systems to bring the sketch back up.</p>
+  <p>Companion files: <a href="cpu-fallback-walkthrough.html">diff walkthrough</a> · <a href="cpu-fallback-lab-manual.html">lab manual</a></p>
+</header>
+<div id="hud">
+  <span>Score <b id="score">0</b></span>
+  <span>Streak <b id="streak">0</b> <span id="fire"></span></span>
+  <span>System <b id="sys">–</b></span>
+  <span>Best <b id="best">0</b></span>
+</div>
+<main>
+  <div class="card" id="intro">
+    <h2>Mission briefing</h2>
+    <p>Five systems, fifteen dispatches. Each correct answer advances the fallback and earns <b>100 pts</b> plus a streak bonus (<b>+25 per streak step</b>). Wrong answers reset the streak — but retries are free, because this is training, not production.</p>
+    <p class="foot">Systems: 1 Dispatch · 2 Texture packing · 3 IR evaluation · 4 Incident response · 5 Final simulation (Game of Life, by hand).</p>
+    <button class="big" id="startBtn">Boot the fallback →</button>
+  </div>
+
+  <div class="card hidden" id="play">
+    <h2><span class="lvl" id="lvlName"></span></h2>
+    <p id="brief"></p>
+    <div id="stage"></div>
+    <div class="msg info" id="msg"></div>
+    <div id="controls"></div>
+  </div>
+
+  <div class="card hidden" id="done">
+    <h2 id="rankTitle"></h2>
+    <p id="rankBody"></p>
+    <p class="foot" id="bestLine"></p>
+    <button class="big" id="againBtn">Run it back ↻</button>
+  </div>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var W = 256; // must match CPU_STORAGE_TEX_WIDTH
+  var score = 0, streak = 0, best = 0;
+  var stepIndex = 0, steps = [];
+  try { best = parseInt(localStorage.getItem('fallbackOpsBest') || '0', 10) || 0; } catch (e) {}
+
+  var $ = function (id) { return document.getElementById(id); };
+  function paint() {
+    $('score').textContent = score;
+    $('streak').textContent = streak;
+    $('best').textContent = best;
+    $('fire').textContent = streak >= 3 ? '(hot)' : '';
+    $('fire').className = streak >= 3 ? 'streakfire' : '';
+  }
+  function msg(text, cls) {
+    var m = $('msg');
+    m.textContent = text;
+    m.className = 'msg ' + (cls || 'info');
+  }
+  function rnd(n) { return Math.floor(Math.random() * n); }
+  function award(base) {
+    var pts = base + Math.min(streak, 8) * 25;
+    score += pts;
+    streak++;
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('fallbackOpsBest', String(best)); } catch (e) {}
+    }
+    paint();
+    return pts;
+  }
+  function penalize() { streak = 0; paint(); }
+
+  /* ---------- round builders ---------- */
+  // Each returns {html, check} where check() returns {ok, explain}
+
+  function rDispatch() {
+    var x = 2 + rnd(7), y = 1 + rnd(4), z = 1 + rnd(2);
+    var total = x * y * z;
+    var f = rnd(total);
+    var ix = f % x, iy = Math.floor(f / x) % y, iz = Math.floor(f / (x * y));
+    return {
+      title: 'System 1 · Dispatch',
+      brief: 'The driver loops a flat id over compute(x, y, z). Map it back to (x, y, z). Same math as runCpuCompute.',
+      html: '<pre>compute(shader, ' + x + ', ' + y + ', ' + z + ')\nflat id = ' + f + '</pre>' +
+        '<p>index.x <input class="num" id="a0"> index.y <input class="num" id="a1"> index.z <input class="num" id="a2"></p>',
+      check: function () {
+        var vals = [0, 1, 2].map(function (i) { return parseInt($('a' + i).value, 10); });
+        var ok = vals[0] === ix && vals[1] === iy && vals[2] === iz;
+        return { ok: ok, explain: ok ? 'Correct dispatch.' : 'Expected (' + ix + ', ' + iy + ', ' + iz + '). ix = flat % x, iy = floor(flat/x) % y.' };
+      }
+    };
+  }
+
+  function rStride() {
+    var pool = [
+      [{ n: 'position', d: 3 }, { n: 'velocity', d: 2 }, { n: 'life', d: 1 }],
+      [{ n: 'pos', d: 2 }, { n: 'col', d: 4 }],
+      [{ n: 'a', d: 1 }, { n: 'b', d: 1 }, { n: 'c', d: 1 }, { n: 'd', d: 1 }, { n: 'e', d: 2 }]
+    ];
+    var fields = pool[rnd(pool.length)];
+    var offs = [], o = 0, i;
+    for (i = 0; i < fields.length; i++) { offs.push(o); o += Math.max(1, Math.ceil(fields[i].d / 4)); }
+    var stride = o;
+    var desc = fields.map(function (f) { return f.n + ':vec' + f.d; }).join(', ');
+    return {
+      title: 'System 2 · Texture packing',
+      brief: 'Struct fields pack into whole texels (ceil(dim/4) each). Compute the stride in texels per element.',
+      html: '<pre>schema { ' + desc + ' }</pre><p>stride = <input class="num" id="a0"> texels</p>',
+      check: function () {
+        var v = parseInt($('a0').value, 10);
+        var ok = v === stride;
+        return { ok: ok, explain: ok ? 'Layout locked.' : 'Expected ' + stride + ' (offsets ' + offs.join(', ') + ').' };
+      }
+    };
+  }
+
+  function rTexel() {
+    var stride = 1 + rnd(3);
+    var e = rnd(600);
+    var t = e * stride;
+    return {
+      title: 'System 2 · Texture packing',
+      brief: 'Fixed texture width is ' + W + '. Element e with stride s starts at texel e·s. Give its (x, y) coordinates.',
+      html: '<pre>element = ' + e + ', stride = ' + stride + '  (texel ' + t + ')</pre>' +
+        '<p>x <input class="num" id="a0"> y <input class="num" id="a1"></p>',
+      check: function () {
+        var x = parseInt($('a0').value, 10), y = parseInt($('a1').value, 10);
+        var ok = x === t % W && y === Math.floor(t / W);
+        return { ok: ok, explain: ok ? 'Fetch coordinates locked.' : 'Expected (' + (t % W) + ', ' + Math.floor(t / W) + '). x = texel % 256, y = texel / 256.' };
+      }
+    };
+  }
+
+  function rEvalArith() {
+    var buf = [1 + rnd(5), 1 + rnd(5), 1 + rnd(5)];
+    var idx = rnd(3);
+    var k = 2 + rnd(4);
+    var ans = buf[idx] * k + 1;
+    var nodes = 'IR nodes in eval order:\n' +
+      '  [read]  d[' + idx + '] -> ' + buf[idx] + '\n' +
+      '  [mul]   read * ' + k + '\n' +
+      '  [add]   mul + 1';
+    return {
+      title: 'System 3 · IR evaluation',
+      brief: 'Evaluate the recorded DAG for one invocation. Buffer and index are given; temporaries memoize by node id.',
+      html: '<pre>buffer d = [' + buf.join(', ') + ']   index.x = ' + idx + '\nprogram: d[i] = d[i] * ' + k + ' + 1\n\n' + nodes + '</pre>' +
+        '<p>d[' + idx + '] after = <input class="num" id="a0"></p>',
+      check: function () {
+        var v = parseFloat($('a0').value);
+        var ok = v === ans;
+        return { ok: ok, explain: ok ? 'Node values check out.' : 'Expected ' + ans + ' (' + buf[idx] + '×' + k + '+1).' };
+      }
+    };
+  }
+
+  function rEvalBranch() {
+    var cur = [0, 0.2 + Math.random() * 0.2, 0.6 + Math.random() * 0.4];
+    cur = cur.map(function (v) { return Math.round(v * 10) / 10; });
+    var idx = rnd(3);
+    var ans = cur[idx] > 0.5 ? 1 : 0;
+    return {
+      title: 'System 3 · IR evaluation',
+      brief: 'Branches become if/else over the sorted block list; only the taken arm executes and phi assigns follow it.',
+      html: '<pre>cur = [' + cur.join(', ') + ']   i = ' + idx + '\nprogram: if (cur[i] &gt; 0.5) nxt[i] = 1 else nxt[i] = 0</pre>' +
+        '<p>nxt[' + idx + '] = <input class="num" id="a0"></p>',
+      check: function () {
+        var v = parseFloat($('a0').value);
+        var ok = v === ans;
+        return { ok: ok, explain: ok ? 'Taken arm correct.' : 'Expected ' + ans + ' (cur[' + idx + '] = ' + cur[idx] + ').' };
+      }
+    };
+  }
+
+  function rEvalVec() {
+    var px = rnd(5), py = rnd(5), vx = 1 + rnd(3), vy = 1 + rnd(3);
+    return {
+      title: 'System 3 · IR evaluation',
+      brief: 'Struct fields read as vectors (arrays on the CPU). Vector add broadcasts nothing here — plain component math.',
+      html: '<pre>position = (' + px + ', ' + py + ')   velocity = (' + vx + ', ' + vy + ')\nprogram: position = position + velocity</pre>' +
+        '<p>new x <input class="num" id="a0"> new y <input class="num" id="a1"></p>',
+      check: function () {
+        var x = parseFloat($('a0').value), y = parseFloat($('a1').value);
+        var ok = x === px + vx && y === py + vy;
+        return { ok: ok, explain: ok ? 'Components check out.' : 'Expected (' + (px + vx) + ', ' + (py + vy) + ').' };
+      }
+    };
+  }
+
+  var incidents = [
+    {
+      symptom: 'Generated code throws: Cannot access \'__t0\' before initialization.',
+      options: [
+        'Declare temps with var instead of let',
+        'Record the temp name only after emitting its expression',
+        'Evaluate nodes in reverse id order'
+      ],
+      answer: 1,
+      why: 'Lookup ran before the name existed, so the expression resolved to itself: let t = t. The GLSL backend emits first and names after — mirror that ordering.'
+    },
+    {
+      symptom: 'Branches and loops silently generate straight-line code. No errors anywhere.',
+      options: [
+        'The CFG has no branch blocks',
+        'Discovery loops test .length on a {blocks, types} wrapper (always undefined)',
+        'sortCFG returns blocks in random order'
+      ],
+      answer: 1,
+      why: 'Comparisons against undefined are always false, so discovery "never runs" with zero errors. Wrappers without .length fail open.'
+    },
+    {
+      symptom: 'Struct vector reads come back empty; writes produce NaN.',
+      options: [
+        'Vectors must be uploaded as vec4',
+        'Field descriptors must carry dim from schema through emission into the read helper',
+        'Struct fields cannot exceed dim 2 on CPU'
+      ],
+      answer: 1,
+      why: 'Without dim, a vec3 read builds a length-0 array; downstream math then produces NaN. The placeholder schema (name-only strings) caused exactly this.'
+    },
+    {
+      symptom: 'Upload, binding, shader, and fetch all verify correct — output still black, zero GL errors.',
+      options: [
+        'Increase texture width until it works',
+        'Disable UNPACK_PREMULTIPLY_ALPHA_WEBGL around the upload',
+        'Switch the sampler to linear filtering'
+      ],
+      answer: 1,
+      why: 'p5 leaves premultiplying on; scalar data packs into red with alpha 0, so premultiply zeroes it on upload. Silent host-side corruption — isolate with a raw shader first.'
+    },
+    {
+      symptom: 'A filter test renders the default hook (passthrough) with no errors.',
+      options: [
+        'The hook name needs a prefix',
+        'The test never called filterColor.end(), so the hook never finalized',
+        'Filter hooks require WebGPU'
+      ],
+      answer: 1,
+      why: 'No finalize, no hook entry, no error — the base shader renders as if modify never ran. Check begin/end pairing before theorizing.'
+    }
+  ];
+
+  function rIncident(used) {
+    var choices = [];
+    var i;
+    for (i = 0; i < incidents.length; i++) { if (used.indexOf(i) < 0) choices.push(i); }
+    var pick = choices[rnd(choices.length)];
+    used.push(pick);
+    var inc = incidents[pick];
+    var order = inc.options.map(function (_, k) { return k; });
+    var j, t;
+    for (j = order.length - 1; j > 0; j--) {
+      t = rnd(j + 1);
+      var tmp = order[j]; order[j] = order[t]; order[t] = tmp;
+    }
+    var opts = order.map(function (orig) {
+      return '<button class="opt" data-v="' + orig + '">' + inc.options[orig] + '</button>';
+    }).join('');
+    return {
+      title: 'System 4 · Incident response',
+      brief: 'Production is down (it is a test, it is fine). Pick the fix.',
+      html: '<pre>' + inc.symptom + '</pre><div id="opts">' + opts + '</div>',
+      used: used,
+      wire: function (onDone) {
+        var btns = document.querySelectorAll('#opts .opt');
+        Array.prototype.forEach.call(btns, function (b) {
+          b.addEventListener('click', function () {
+            var good = parseInt(b.getAttribute('data-v'), 10) === inc.answer;
+            Array.prototype.forEach.call(btns, function (x) { x.disabled = true; });
+            if (good) { b.classList.add('good'); } else { b.classList.add('bad'); }
+            onDone(good, inc.why);
+          });
+        });
+      }
+    };
+  }
+
+  function buildSteps() {
+    var used = [];
+    return [
+      rDispatch(), rDispatch(), rDispatch(),
+      rStride(), rTexel(), rTexel(),
+      rEvalArith(), rEvalBranch(), rEvalVec(),
+      rIncident(used), rIncident(used), rIncident(used),
+      { title: 'System 5 · Final simulation', placeholder: true },
+      { title: 'System 5 · Final simulation', placeholder: true },
+      { title: 'System 5 · Final simulation', placeholder: true }
+    ];
+  }
+
+  function show(i) {
+    stepIndex = i;
+    var s = steps[i];
+    if (s.placeholder) {
+      s = makeBlinker(i % 3);
+      steps[i] = s;
+    }
+    $('lvlName').textContent = s.title;
+    $('sys').textContent = (i + 1) + ' / ' + steps.length;
+    $('brief').textContent = s.brief;
+    $('stage').innerHTML = s.html;
+    $('controls').innerHTML = '';
+    msg('', 'info');
+    if (s.wire) {
+      s.wire(function (good, why) { resolve(good, why); }, $('controls'));
+      return;
+    }
+    var btn = document.createElement('button');
+    btn.textContent = 'Execute →';
+    btn.addEventListener('click', function () {
+      var r = s.check();
+      if (r.ok) btn.disabled = true;
+      resolve(r.ok, r.explain);
+    });
+    $('controls').appendChild(btn);
+  }
+
+  function makeBlinker(v) {
+    var starts = [
+      [[0, 1], [1, 1], [2, 1]],
+      [[1, 0], [1, 1], [1, 2]],
+      [[1, 1], [2, 1], [3, 1]]
+    ];
+    var ends = [
+      [[1, 0], [1, 1], [1, 2]],
+      [[0, 1], [1, 1], [2, 1]],
+      [[2, 0], [2, 1], [2, 2]]
+    ];
+    var start = starts[v % 3], target = ends[v % 3];
+    var grid = '', y, x, k;
+    var init = {};
+    start.forEach(function (c) { init[c[0] + ',' + c[1]] = 1; });
+    for (y = 0; y < 4; y++) {
+      for (x = 0; x < 4; x++) {
+        k = x + ',' + y;
+        grid += '<button data-k="' + k + '" class="' + (init[k] ? 'on' : '') + '" aria-label="cell"></button>';
+      }
+    }
+    return {
+      title: 'System 5 · Final simulation',
+      brief: 'One Game-of-Life step, by hand. The grid shows generation N. Click cells to set generation N+1, then verify. (Standard rules; pattern chosen so edges stay dead.)',
+      html: '<div id="grid">' + grid + '</div><p class="foot">Click toggles. Births need exactly 3 live neighbors; survival needs 2 or 3.</p>',
+      wire: function (onDone, controls) {
+        var state = {};
+        Object.keys(init).forEach(function (key) { state[key] = 1; });
+        document.querySelectorAll('#grid button').forEach(function (b) {
+          var key = b.getAttribute('data-k');
+          b.addEventListener('click', function () {
+            if (state[key]) { delete state[key]; b.classList.remove('on'); }
+            else { state[key] = 1; b.classList.add('on'); }
+          });
+        });
+        var btn = document.createElement('button');
+        btn.textContent = 'Verify generation';
+        btn.addEventListener('click', function () {
+          var keys = Object.keys(state).sort().join('|');
+          var want = target.map(String).sort().join('|');
+          var good = keys === want;
+          if (good) btn.disabled = true;
+          onDone(good, good
+            ? 'Blinker flipped. Ship it.'
+            : 'Not quite — recount: births need exactly 3, survival 2 or 3.');
+        });
+        controls.appendChild(btn);
+      }
+    };
+  }
+
+  function resolve(good, why) {
+    if (good) {
+      var pts = award(100);
+      msg('✓ +' + pts + ' pts — ' + why, 'good');
+    } else {
+      penalize();
+      msg('✗ ' + why + ' — streak reset. Retry free.', 'bad');
+      return;
+    }
+    var controls = $('controls');
+    var next = document.createElement('button');
+    next.textContent = (stepIndex + 1 >= steps.length) ? 'Finish →' : 'Next dispatch →';
+    next.addEventListener('click', function () {
+      if (stepIndex + 1 >= steps.length) { finish(); }
+      else { show(stepIndex + 1); }
+    });
+    controls.appendChild(next);
+  }
+
+  function rankFor(s) {
+    if (s >= 2000) return ['Strands Steward', 'You own the fallback. Open the PR.'];
+    if (s >= 1500) return ['Fallback Engineer', 'Solid. One more pass on the weak system.'];
+    if (s >= 900) return ['Dispatch Intern', 'warming up. The lab manual is your friend.'];
+    return ['Curious Bystander', 'The GPU sends its regards. Try again — retries are free.'];
+  }
+
+  function finish() {
+    $('play').classList.add('hidden');
+    $('done').classList.remove('hidden');
+    var r = rankFor(score);
+    $('rankTitle').textContent = 'Fallback restored — rank: ' + r[0];
+    $('rankBody').textContent = r[1] + ' Final score ' + score + ' over ' + steps.length + ' dispatches.';
+    $('bestLine').textContent = 'Best score on this machine: ' + best + '.';
+  }
+
+  $('startBtn').addEventListener('click', function () {
+    score = 0; streak = 0; paint();
+    steps = buildSteps();
+    $('intro').classList.add('hidden');
+    $('done').classList.add('hidden');
+    $('play').classList.remove('hidden');
+    show(0);
+  });
+  $('againBtn').addEventListener('click', function () {
+    score = 0; streak = 0; paint();
+    steps = buildSteps();
+    $('done').classList.add('hidden');
+    $('play').classList.remove('hidden');
+    show(0);
+  });
+  paint();
+})();
+</script>
+</body>
+</html>

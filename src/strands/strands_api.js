@@ -1201,6 +1201,13 @@ export function initGlobalStrandsAPI(p5, fn, strandsContext) {
       defaultValue = bufferOrSchema;
     }
 
+    // Element type for scalar lists, used by render-path fallbacks that
+    // repack values (e.g. data textures on WebGL).
+    let arrayType = 'float';
+    const arrayCtor = value?._arrayType?.name;
+    if (arrayCtor === 'Int32Array') arrayType = 'int';
+    else if (arrayCtor === 'Uint32Array') arrayType = 'uint';
+
     const { id, dimension } = build.variableNode(
       strandsContext,
       { baseType: 'storage', dimension: 1 },
@@ -1208,7 +1215,7 @@ export function initGlobalStrandsAPI(p5, fn, strandsContext) {
     );
     strandsContext.uniforms.push({
       name: shaderName,
-      typeInfo: { baseType: 'storage', dimension: 1, schema, isStorageList, maxCapacity },
+      typeInfo: { baseType: 'storage', dimension: 1, schema, isStorageList, maxCapacity, arrayType },
       defaultValue
     });
 

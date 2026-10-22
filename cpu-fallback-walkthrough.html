@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebGPU → CPU Fallback: Interactive Diff Walkthrough</title>
+<style>
+  :root {
+    --bg: #fafafa;
+    --card: #ffffff;
+    --ink: #1d1d1f;
+    --muted: #6e6e73;
+    --accent: #0a66ff;
+    --good: #1a7f37;
+    --bad: #cf222e;
+    --line: #e5e5ea;
+    --code: #f2f3f5;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    margin: 0;
+    line-height: 1.6;
+  }
+  header {
+    background: #101014;
+    color: #fff;
+    padding: 28px 24px 20px;
+  }
+  header h1 { margin: 0 0 6px; font-size: 24px; }
+  header p { margin: 4px 0; color: #c7c7cc; font-size: 14px; }
+  header code { background: #2c2c2e; padding: 1px 6px; border-radius: 4px; }
+  #progresswrap {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--card);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 24px;
+  }
+  #navbar { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  #navbar button {
+    border: 1px solid var(--line);
+    background: var(--card);
+    border-radius: 999px;
+    padding: 4px 12px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #navbar button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+  #navbar button.done { border-color: var(--good); color: var(--good); }
+  #bar { height: 8px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  #barfill { height: 100%; width: 0%; background: var(--good); transition: width .3s; }
+  #barlabel { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 24px 120px; }
+  section.card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+    margin: 20px 0;
+  }
+  section.card h2 { margin-top: 0; font-size: 20px; }
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    background: #eef4ff;
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 1px 8px;
+    margin: 2px 4px 2px 0;
+    font-family: ui-monospace, monospace;
+  }
+  pre {
+    background: var(--code);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    font-size: 13px;
+  }
+  .predict {
+    border: 1px dashed var(--accent);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin: 14px 0;
+    background: #f7faff;
+  }
+  .predict button, .q button.opt, .navbtn {
+    border: 1px solid var(--accent);
+    background: #fff;
+    color: var(--accent);
+    border-radius: 8px;
+    padding: 6px 14px;
+    font-size: 14px;
+    cursor: pointer;
+    margin: 4px 6px 4px 0;
+  }
+  .predict button:hover, .q button.opt:hover, .navbtn:hover { background: #eef4ff; }
+  .answer { display: none; margin-top: 10px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .answer.show { display: block; }
+  .q { border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin: 12px 0; }
+  .q.correct { border-color: var(--good); }
+  .q.wrong { border-color: var(--bad); }
+  .q .expl { display: none; margin-top: 8px; font-size: 14px; }
+  .q.done .expl { display: block; }
+  .q button.opt.picked-good { background: var(--good); color: #fff; border-color: var(--good); }
+  .q button.opt.picked-bad { background: var(--bad); color: #fff; border-color: var(--bad); }
+  .q button.opt:disabled { cursor: default; opacity: .85; }
+  #score { font-weight: bold; }
+  .check { display: flex; gap: 8px; align-items: flex-start; margin-top: 16px; font-size: 14px; }
+  .story { border-left: 4px solid var(--accent); padding: 4px 0 4px 14px; margin: 16px 0; }
+  .story h4 { margin: 0 0 4px; }
+  dl.gloss dt { font-weight: bold; font-family: ui-monospace, monospace; margin-top: 10px; }
+  dl.gloss dd { margin: 2px 0 0; color: #333; }
+  .flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 14px 0; }
+  .node {
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    background: #fff;
+    flex: 1 1 140px;
+  }
+  .node small { display: block; color: var(--muted); }
+  .node:hover { background: #eef4ff; }
+  .arrow { align-self: center; font-size: 20px; color: var(--muted); }
+  .widget { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin: 12px 0; }
+  .widget input { width: 70px; padding: 4px 6px; margin: 0 4px; }
+  .foot { color: var(--muted); font-size: 13px; }
+  .prevnext { display: flex; justify-content: space-between; margin-top: 18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WebGPU → CPU Fallback: Interactive Diff Walkthrough</h1>
+  <p>Branch <code>feat/cpu-fallback-compute</code> · issue <code>#9223</code> (follow-up to <code>#9175</code> / <code>#9191</code>)</p>
+  <p>Rule: at every ⏸, cover the answer, say it out loud, then uncover. Score: <span id="score">0 / 6</span> on the calibration quiz.</p>
+</header>
+
+<div id="progresswrap">
+  <div id="navbar"></div>
+  <div id="bar"><div id="barfill"></div></div>
+  <div id="barlabel"></div>
+</div>
+
+<main>
+<!-- ================= STOP 0 ================= -->
+<section class="card" id="stop0" data-title="0 · Map">
+  <h2>Stop 0 · Map of the territory</h2>
+  <p>User code flows through three layers. Click a box to jump to its stop.</p>
+  <div class="flow">
+    <div class="node" data-goto="stop2">Sketch API<br><small>createStorage · buildComputeShader · compute · uniformStorage · instances()</small></div>
+    <div class="arrow">→</div>
+    <div class="node" data-goto="stop3">Recording → IR<br><small>DAG (math) + CFG (order) · p5.strands.js · strands_api.js</small></div>
+    <div class="arrow">→</div>
+    <div class="node" data-goto="stop5">Backends<br><small>WGSL · GLSL · <b>JS (new)</b></small></div>
+    <div class="arrow">→</div>
+    <div class="node" data-goto="stop6">Execution<br><small>GPU dispatch · CPU loop · <b>data textures (new)</b></small></div>
+  </div>
+  <p>Files changed: 6 modified, 2 new, 1 test file.</p>
+  <span class="tag">src/webgl/shaderHookUtils.js +4</span>
+  <span class="tag">src/webgl/p5.RendererGL.js +339</span>
+  <span class="tag">src/strands/p5.strands.js +17/−1</span>
+  <span class="tag">src/strands/strands_api.js +10/−1</span>
+  <span class="tag">src/webgl/strands_glslBackend.js +125</span>
+  <span class="tag">src/webgl/3d_primitives.js +8/−1</span>
+  <span class="tag">src/strands/strands_jsBackend.js NEW</span>
+  <span class="tag">src/webgl/cpuStorageTexture.js NEW</span>
+  <span class="tag">test/unit/webgl/p5.RendererGL.js: CPU compute fallback suite (21 tests)</span>
+  <div class="predict"><strong>⏸ Predict:</strong> the issue lists three candidate approaches (dual-mode objects, JS backend, source rewriting). Which two did this branch implement, and where does each live?
+    <br><button>Reveal</button>
+    <div class="answer">Both 1 and 2, exactly as the issue guessed. <b>Dual-mode objects:</b> <code>CpuStorageBuffer</code>/<code>CpuStorageList</code> in <code>p5.RendererGL.js</code> quack like GPU storage (same <code>_isStorageBuffer</code>/<code>_schema</code> flags <code>uniformStorage()</code> checks). <b>JS backend:</b> <code>strands_jsBackend.js</code> lowers recorded IR to a JS function once per shader. Approach 3 (rewriting the sketch) was correctly ignored.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop0"> I can name which file owns each layer.</label>
+  <div class="prevnext"><span></span><button class="navbtn" data-goto="stop1">Next →</button></div>
+</section>
+
+<!-- ================= STOP 1 ================= -->
+<section class="card" id="stop1" data-title="1 · Hook lookup">
+  <h2>Stop 1 · The 4-line key — <span class="tag">shaderHookUtils.js</span></h2>
+  <p><code>getShaderHookTypes</code> parses a hook signature into parameter info. It only searched <code>vertex</code>/<code>fragment</code>; compute hooks live under <code>hooks.compute</code>, so <code>buildComputeShader</code> died on WebGL with <code>Can't find hook iteration!</code>. The WebGPU renderer's own version already searched <code>compute</code>; this mirrors it:</p>
+<pre>if (!body) {
+  body = shader.hooks.compute[hookName];
+  fullSrc = shader._computeSrc;
+}</pre>
+  <div class="predict"><strong>⏸ Predict:</strong> our hook is spelled <code>(ivec3 index)</code> but WebGPU's is <code>(index: vec3&lt;i32&gt;)</code>. Why can't we reuse the same string?
+    <br><button>Reveal</button>
+    <div class="answer">Different parsers: the WebGL one splits parameters on whitespace as <code>type name</code>; WebGPU's splits on <code>:</code> as <code>name: type</code>. Same hook, two shader languages. With the WGSL spelling, the WebGL parser reads type <code>index:</code> and the hook resolves to garbage.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop1"> I can explain why the hook string differs per renderer.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop0">← Prev</button><button class="navbtn" data-goto="stop2">Next →</button></div>
+</section>
+
+<!-- ================= STOP 2 ================= -->
+<section class="card" id="stop2" data-title="2 · RendererGL">
+  <h2>Stop 2 · RendererGL: four additions — <span class="tag">p5.RendererGL.js</span></h2>
+  <p><strong>2a. <code>baseComputeShader()</code></strong> builds <code>new Shader(this, 'void main() {}', {compute: {'void iteration': '(ivec3 index) {}'}})</code>. The <code>Shader</code> class already detects compute shaders from this shape. The source is never compiled on the CPU path; it exists so <code>modify()</code> has hook type information to record the IR against.</p>
+  <p><strong>2b. <code>CpuStorageBuffer</code> / <code>CpuStorageList</code>.</strong> Plain-JS twins of the GPU classes. Numbers live in typed arrays (so <code>Int32Array</code> keeps integer semantics); structs stay as JS objects. <code>update</code>/<code>set</code>/<code>push</code> mirror GPU validation errors. Every mutator bumps <code>_cpuVersion</code>.</p>
+  <p><strong>2c. <code>createStorage</code> / <code>createStorageList</code>.</strong> Same input shapes as WebGPU (count, typed array, plain array, struct array, schema template), minus GPU buffers and WGSL packing. Schema inference records <code>{name, dim, kind}</code> per field.</p>
+  <p><strong>2d. <code>compute()</code> delegates to <code>runCpuCompute()</code>; <code>getTexture</code> routes CPU storage to cached data textures; <code>_updateTexture</code> writes stride/count uniforms per draw.</strong></p>
+  <div class="predict"><strong>⏸ Predict:</strong> the first schema placeholder was <code>{fields: ['position', …]}</code> and broke with <code>isStrandsNode undefined</code>. Why do fields need <code>{name, dim}</code> objects?
+    <br><button>Reveal</button>
+    <div class="answer"><code>createStructArrayElementProxy</code> (<code>ir_builders.js</code>) builds one getter per field using <code>field.name</code> and sizes IR nodes with <code>field.dim</code>. Strings have neither, so no <code>position</code> getter existed; <code>d[i].position</code> evaluated to <code>undefined</code> at record time and <code>primitiveConstructorNode</code> crashed reading <code>a.isStrandsNode</code> on it.</div>
+  </div>
+  <div class="predict"><strong>⏸ Predict:</strong> who bumps <code>_cpuVersion</code> besides the mutators, and why must they?
+    <br><button>Reveal</button>
+    <div class="answer"><code>runCpuCompute</code> bumps every bound store after the loop, because compute writes mutate raw arrays/objects directly with no setter call. The texture uploader compares versions to decide re-upload.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop2"> I can explain the placeholder-schema crash and the version scheme.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop1">← Prev</button><button class="navbtn" data-goto="stop3">Next →</button></div>
+</section>
+
+<!-- ================= STOP 3 ================= -->
+<section class="card" id="stop3" data-title="3 · IR stash">
+  <h2>Stop 3 · Keeping the IR — <span class="tag">p5.strands.js</span></h2>
+<pre>const cpuIR = isComputeShader
+  ? { dag, cfg, uniforms: [...uniforms], hooks: [...hooks] }
+  : undefined;
+const modified = oldModify.call(this, hooksObject);
+if (cpuIR) modified._cpuIR = cpuIR;</pre>
+  <p><strong>What <code>modify()</code> normally does, step by step.</strong> When you write <code>buildComputeShader(() =&gt; { ... })</code>, your callback never runs as real logic. <code>modify()</code> (in <code>src/strands/p5.strands.js</code>) does three things: (1) <em>transpile</em> your function source into interceptable JS, (2) <em>record</em> it by executing that JS with every p5 operation (like <code>+</code>, <code>sin()</code>, <code>d[i]</code>) replaced by a function that builds a graph node instead of computing a value, (3) <em>generate</em> shader text from that graph via <code>generateShaderCode()</code> and hand it to the old <code>modify</code> (<code>oldModify</code>) which installs real hook functions. Then it calls <code>deinitStrandsContext()</code>, which wipes the DAG, CFG, uniforms, and hooks clean for the next shader.</p>
+  <p><strong>Recording vs executing.</strong> This is the single most important idea. If your callback says <code>let x = a + b</code>, no addition happens at record time. Instead <code>a + b</code> creates an <code>OPERATION</code> node meaning "add these two inputs", and <code>x</code> becomes a handle (a <code>StrandsNode</code> wrapping a numeric node ID). The actual addition happens later, either on the GPU (compiled WGSL/GLSL) or, new in this branch, in JS by the CPU backend replaying the graph. That is why the quiz says the callback body executes zero times as logic.</p>
+  <p><strong>The four pieces, concretely.</strong> <code>dag</code> (directed acyclic graph) is the math: every value node (literals, variables, <code>a+b</code>, <code>d[i]</code> reads) plus which nodes each one depends on. "Acyclic" just means values flow one way, no loops at the value level; loops live elsewhere. <code>cfg</code> (control-flow graph) is the order: a list of basic blocks (<code>GLOBAL</code>, <code>FUNCTION</code> entry per hook, <code>IF_COND</code>, <code>FOR</code>, <code>SCOPE_START/END</code>, <code>BRANCH</code>) plus edges between them and the statement IDs recorded in each block. <code>uniforms</code> is the inputs table: every <code>uniformStorage()</code> / <code>uniformFloat()</code> call pushes <code>{name, typeInfo, defaultValue}</code>, where <code>defaultValue</code> is either the buffer or a function returning it. <code>hooks</code> is the entry-point table: one entry per hook with <code>entryBlockID</code> (which CFG block to start compiling from), <code>rootNodeID</code>, <code>hookType</code>, and <code>shaderContext: 'compute'</code>. Without <code>hooks</code> the backend would not know where the compute body starts; without <code>uniforms</code> it could not resolve buffer names to actual CPU objects.</p>
+  <p><strong>Reading the diff line by line.</strong> <code>isComputeShader = this.shaderType === 'compute'</code> gates everything so render shaders pay nothing. <code>dag</code> and <code>cfg</code> are stored by reference (they are dead after <code>deinit</code> anyway, so no copy is needed). <code>uniforms: [...uniforms]</code> and <code>hooks: [...hooks]</code> make a shallow array copy, meaning a new array holding the same entry objects, because <code>deinit</code> resets <code>ctx.uniforms = []</code> which would otherwise orphan nothing but is still safer to snapshot. Finally <code>modified._cpuIR = cpuIR</code> attaches the stash to the returned shader object, which is what <code>runCpuCompute()</code> later reads as <code>shader._cpuIR</code>. If it is missing, you get the "missing recorded program" internal error.</p>
+  <p><strong>Why render shaders are excluded.</strong> Two reasons: memory (every render <code>modify()</code> would otherwise retain a full graph forever) and risk (the CPU backend only understands the compute hook; stashing render IR would suggest it can run it, which it cannot). The ternary makes this a zero behavior change for all existing material, filter, and color shaders.</p>
+  <div class="predict"><strong>⏸ Predict:</strong> why stash all four (<code>dag</code>, <code>cfg</code>, <code>uniforms</code>, <code>hooks</code>) instead of just the graph?
+    <br><button>Reveal</button>
+    <div class="answer"><code>dag</code>/<code>cfg</code> hold math and order, but buffer bindings and defaults live in <code>uniforms</code>, and the hook's entry block ID lives in <code>hooks</code>. The driver needs every one: entry block to start compiling from, uniforms to resolve values. Concretely, <code>compileCpuComputeHook()</code> does <code>cpuIR.hooks.find(h =&gt; h.shaderContext === 'compute')</code> to get <code>entryBlockID</code>, walks <code>cfg</code> from there with <code>sortCFG</code>, evaluates <code>dag</code> nodes into JS strings, and looks up every storage/scalar name in <code>uniforms</code>.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop3"> I can say what each stashed piece is for.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop2">← Prev</button><button class="navbtn" data-goto="stop4">Next →</button></div>
+</section>
+
+<!-- ================= STOP 4 ================= -->
+<section class="card" id="stop4" data-title="4 · arrayType">
+  <h2>Stop 4 · One extra field — <span class="tag">strands_api.js</span></h2>
+  <p><strong>What <code>uniformStorage(name, bufferOrSchema)</code> does.</strong> It does not copy data. It declares "this shader reads a buffer called <code>name</code>" by creating a <code>VARIABLE</code> node with <code>baseType: 'storage'</code> and pushing <code>{name, typeInfo, defaultValue}</code> onto <code>ctx.uniforms</code>. <code>defaultValue</code> is the buffer itself, or the function you passed (e.g. <code>() =&gt; cells</code>), which is re-called every <code>compute()</code> so buffer swaps take effect. <code>typeInfo</code> carries <code>schema</code> (struct field layout, or null for plain numbers), <code>isStorageList</code>, <code>maxCapacity</code>, and now <code>arrayType</code>.</p>
+  <p><strong>What <code>arrayType</code> is and where it comes from.</strong> CPU/GPU buffers hold numbers in typed arrays: <code>Float32Array</code>, <code>Int32Array</code>, or <code>Uint32Array</code>. Each buffer object stores its constructor as <code>_arrayType</code>. The new code reads <code>value?._arrayType?.name</code> and maps it to the string <code>'float' | 'int' | 'uint'</code> (defaulting to <code>'float'</code> for plain JS arrays, which <code>createStorage</code> treats as float). This string rides along on <code>typeInfo.arrayType</code> inside the <code>uniforms</code> entry stashed in Stop 3.</p>
+  <p><strong>Why the render path needs it but WGSL does not.</strong> On WebGPU, a storage buffer has a real integer type, so an <code>int</code> buffer read is already an <code>int</code>. On WebGL, the render-path replacement is a <em>data texture</em> (Stop 6), and textures only store floats (<code>RGBA32F</code>). So every fetch comes back as <code>float</code>, e.g. <code>texelFetch(data, ...).r</code>. If your shader then does integer math or passes the value somewhere expecting <code>int</code>, GLSL refuses to compile because GLSL is strictly typed: <code>float</code> does not implicitly become <code>int</code>. The fix in <code>generateStorageRead()</code> (<code>strands_glslBackend.js</code>) is a wrapping cast: <code>int(fetch.r)</code> for int buffers, <code>uint(fetch.r)</code> for uint buffers, plain <code>fetch.r</code> for floats. The WGSL backend simply never reads this field, which is why the diff comment says it is ignored there.</p>
+  <p><strong>Common confusion: this affects reads, not writes.</strong> The compute shader itself runs on the CPU (Stop 5) against the real typed array, so integer semantics are already correct there (<code>Math.trunc</code> for int division, real ints in the array). <code>arrayType</code> only matters when a <em>render</em> shader (material/filter, running on the GPU) reads CPU-computed data through the texture. That is also why scalar struct fields with <code>dim &gt; 1</code> do not need it: vectors are always float in this codebase.</p>
+  <label class="check"><input type="checkbox" data-stop="stop4"> I know why an int buffer read needs wrapping on the render path.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop3">← Prev</button><button class="navbtn" data-goto="stop5">Next →</button></div>
+</section>
+
+<!-- ================= STOP 5 ================= -->
+<section class="card" id="stop5" data-title="5 · JS backend">
+  <h2>Stop 5 · The JS backend — <span class="tag">strands_jsBackend.js (new)</span></h2>
+  <p><strong>The big idea: compile once, run many times.</strong> The alternative the issue considered was <em>interpreting</em> the IR: walk the DAG/CFG node by node for every index, every <code>compute()</code>. That works but repeats graph traversal <code>N</code> times per dispatch. Instead <code>compileCpuComputeHook(cpuIR)</code> translates the whole compute hook into one JS function <em>once per shader</em> (cached as <code>shader._cpuComputeFn</code>) shaped like <code>fn(__idx, __s, __u, __v, H)</code>, then <code>runCpuCompute(shader, x, y, z)</code> calls it in a plain loop, once per index. <code>new Function(body)</code> is used the way shader compilation uses <code>compileShader</code>: the generated source string becomes an executable function. Dump it with <code>console.log(shader._cpuComputeFn.toString())</code> when debugging; the <code>let t = t</code> bug was found exactly this way.</p>
+  <p><strong>How control flow becomes JS.</strong> <code>sortCFG(outgoingEdges, entryBlockID)</code> returns blocks in an order the GLSL backend already proved correct, so the JS backend reuses the same structure: <code>emitRange()</code> walks the sorted list and writes <code>if / else if / else</code> chains for <code>IF_COND/ELSE_COND</code> runs, <code>for (init; cond; update)</code> for <code>FOR</code> blocks, and <code>{ }</code> for <code>SCOPE_START/END</code>. <code>BRANCH</code> blocks pre-declare phi temporaries (<code>let t;</code>), loop bodies assign them per branch (<code>assignPhiNodeValues</code>). A <em>phi node</em> is compiler jargon for "this variable has a different value depending on which branch ran, so merge them here"; straight-line code like <code>let n = 0; n = n + 1</code> needs no phi, which is why quiz Q3 works with plain rebinding. Mirroring the GLSL handlers handler-for-handler is deliberate: any fix to ordering logic only needs to be reasoned about once.</p>
+  <p><strong>How values work: the value model and environments.</strong> JS has one number type, but GLSL distinguishes <code>float</code>, <code>int</code>, <code>bool</code>, and vectors. The backend emulates GLSL: scalars are JS numbers/booleans, vectors are plain JS arrays (e.g. <code>vec3(1,2,3)</code> becomes <code>[1,2,3]</code> via <code>H.vec()</code>), scalar-vector ops <em>broadcast</em> (adding <code>1</code> to <code>[1,2,3]</code> adds to each element), int division truncates (<code>Math.trunc(a/b)</code>), and float <code>%</code> becomes <code>mod()</code> (<code>a - b*floor(a/b)</code>, which differs from JS <code>%</code> for negatives). Every identifier compiles to an environment lookup, never a bare JS variable: <code>__s["buf"]</code> is a storage buffer object, <code>__u["speed"]</code> is a scalar uniform, <code>__v["myVar"]</code> is a shader local, <code>__idx</code> is the current <code>(x,y,z)</code> index array. This means user names can never collide with generated <code>__t0</code> temporaries, and rebinding a buffer under the same uniform name just changes what <code>__s</code> points to.</p>
+  <p><strong><code>H</code>: the single choke point.</strong> All runtime behavior lives in the <code>helpers</code> object passed as <code>H</code>: <code>H.vec/binop/unop/swiz/swizSet</code> for values, <code>H.readFieldValue/writeFieldValue</code> for struct fields (converting between stored <code>p5.Vector</code>/<code>p5.Color</code>/array/number and plain math values), and <code>H.call(name, args)</code> for every builtin (<code>sin</code>, <code>mix</code>, <code>dot</code>, etc. implemented with <code>Math.*</code>). Two special cases: <code>random()</code> is a deterministic hash of <code>(seed, flatIndex, callCount)</code>, documented as approximate, not bit-identical to the GPU; <code>noise()</code> calls the real <code>p5.noise()</code> after temporarily applying the shader's <code>noiseDetail()</code> octaves/falloff and restoring them in a <code>finally</code>. Storage-list ops compile to <code>H.pushList/H.lenList/H.popList</code> plus <code>H.makeStruct</code>. If you add a new builtin, <code>H.call</code> is the only place to touch.</p>
+  <p><strong>The driver: <code>runCpuCompute(shader, x, y, z)</code>.</strong> It validates the shader is a compute shader, errors if <code>_cpuIR</code> is missing, computes <code>total = x*y*z</code>, warns (not caps) past 4096 items because silently dropping cells would corrupt simulations like Game of Life, then: (1) <em>resolve stores once</em> via <code>resolveStores()</code>: call function initializers (this is why the <code>[nextCells, cells] = [cells, nextCells]</code> swap keeps working, each dispatch re-resolves), then apply <code>setUniform()</code> overrides; (2) <em>resolve scalars once</em> via <code>resolveScalars()</code>, converting <code>p5.Vector</code>/Color to plain arrays with <code>toPlainValue()</code>; (3) loop <code>flat = 0..total-1</code>, mapping back to <code>(x,y,z)</code> with <code>ix = flat % x; iy = floor(flat/x) % y; iz = floor(flat/(x*y))</code> (try the widget below), resetting <code>randomCalls</code> and passing a <em>fresh</code> <code>{}</code> locals object per invocation so iterations cannot leak state; (4) bump every bound store's <code>_cpuVersion</code> afterwards, because kernel writes mutate raw arrays/objects directly with no setter call, and the texture uploader (Stop 6) relies on the version to know to re-upload.</p>
+  <div class="widget"><strong>Index mapper (same math as the driver):</strong><br>
+    x <input id="wX" type="number" value="4"> y <input id="wY" type="number" value="4"> z <input id="wZ" type="number" value="1"> flat <input id="wF" type="number" value="5">
+    <button class="navbtn" id="wGo">Map</button> <span id="wOut"></span>
+  </div>
+  <div class="predict"><strong>⏸ Predict:</strong> three bugs came out of test runs and are annotated in-code. Name all three from memory.
+    <br><button>Reveal</button>
+    <div class="answer">1) Temp names must record <em>after</em> emitting the expression, or you get <code>let t = t</code> (compare with the GLSL backend's ordering). 2) The <code>{blocks, types}</code> wrapper has no <code>.length</code> — two loops silently never ran. 3) Struct field descriptors must carry <code>dim</code>, or vector reads come back empty.</div>
+  </div>
+  <div class="predict"><strong>⏸ Predict:</strong> in the doubling example the read <code>d[idx]</code> and the write target <code>d[idx]</code> are two different IR nodes with identical inputs. Why duplicate instead of reuse?
+    <br><button>Reveal</button>
+    <div class="answer">Reads and writes need different node identities: the read is a value (an <code>OPERATION</code> producing data), the write target anchors an <code>ASSIGNMENT</code>. Sharing one node would conflate "compute this value" with "store to this location" — and the write-side node isn't even recorded as an instruction, only the assignment is.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop5"> I can explain lower-once vs interpret-each-time and the value model.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop4">← Prev</button><button class="navbtn" data-goto="stop6">Next →</button></div>
+</section>
+
+<!-- ================= STOP 6 ================= -->
+<section class="card" id="stop6" data-title="6 · Data textures">
+  <h2>Stop 6 · Data textures — <span class="tag">cpuStorageTexture.js (new)</span></h2>
+  <p><strong>The problem: two processors, one dataset.</strong> After Stop 5, compute results live in plain JS memory (typed arrays, object arrays). But material and filter shaders still execute on the GPU, which cannot read JS memory directly. The bridge is a <em>data texture</em>: the CPU packs buffer contents into a floating-point image, uploads it with <code>texImage2D</code>, and the render shader reads values back with <code>texelFetch</code> (Stop 7). No user code changes; <code>uniformStorage()</code> names keep working on both paths.</p>
+  <p><strong>Layout, with a worked example.</strong> Format is <code>RGBA32F</code>: each texel (texture pixel) holds 4 x 32-bit floats (<code>r,g,b,a</code>). Width is fixed at 256 texels, so any element index <code>i</code> maps to 2D coordinates with shader-only math: <code>x = i % 256</code>, <code>y = i / 256</code> (integer division). A scalar list uses one texel per element, value in red (<code>pixels[i*4] = value</code>). A struct packs each field into whole texels: <code>texelsPerField = ceil(dim/4)</code>, so a <code>vec3 position</code> (dim 3) takes 1 texel, a hypothetical dim-5 field would take 2. Fields get baked integer <code>offset</code>s from the schema in order, and <code>stride</code> = total texels per element. Example: <code>{position: vec3, velocity: vec3}</code> gives offsets <code>0, 1</code> and stride <code>2</code>; element <code>e</code>'s velocity starts at texel <code>e*2 + 1</code>, channels <code>.rgb</code>. <code>cpuStorageLayout()</code> computes <code>{fields, stride, count, width, height}</code> and <code>packCpuStorage()</code> fills the <code>Float32Array</code>; <code>fieldComponents()</code> knows how to read numbers, plain arrays, <code>p5.Vector</code> (<code>.x/.y/.z</code>), and <code>p5.Color</code> (<code>_getRGBA()</code>).</p>
+  <p><strong>Why <code>stride</code> and <code>count</code> are uniforms, not constants.</strong> The GLSL in Stop 7 bakes field <em>offsets</em> as literals (they come from the schema known at codegen time) but reads <code>stride</code> from <code>uniform int &lt;name&gt;_stride</code> and list length from <code>uniform int &lt;name&gt;_count</code>. Reason: you can rebind a <em>different</em> buffer under the same uniform name (or push to a list, changing its length) without rebuilding the shader. <code>_updateTexture()</code> / <code>_setCpuStorageLayoutUniforms()</code> in <code>p5.RendererGL.js</code> upload the fresh numbers every draw. If stride were baked, rebinding a differently-shaped buffer would silently read the wrong texels.</p>
+  <p><strong>The uploader: <code>CpuStorageTexture</code>.</strong> It deliberately implements the exact interface the existing sampler path expects: <code>bindTexture()</code> (create-once + bind a <code>TEXTURE_2D</code>) and <code>update()</code> (re-upload only if <code>buffer._cpuVersion !== _uploadedVersion</code>). Instances are cached per renderer in <code>renderer.textures</code> via <code>cpuStorageTextureFor()</code>, so repeated binds are cheap. Filtering is <code>NEAREST</code> (exact texels, no blending) and wrap is <code>CLAMP_TO_EDGE</code>. The premultiply guard from the quiz (<code>pixelStorei(UNPACK_PREMULTIPLY_ALPHA_WEBGL, false)</code> around the upload, restoring the old value after) exists because p5 leaves premultiplying on after text drawing, which would multiply RGB by alpha 0 and zero out scalar payloads sitting in red.</p>
+  <div class="predict"><strong>⏸ Predict:</strong> uploads rendered black with no GL error until one <code>pixelStorei</code> guard was added. What was it and why?
+    <br><button>Reveal</button>
+    <div class="answer">p5 leaves <code>UNPACK_PREMULTIPLY_ALPHA_WEBGL</code> on outside text drawing. A scalar list packs its value into red with alpha 0, and premultiplying zeroes RGB by alpha. The upload now disables premultiply around <code>texImage2D</code> and restores the previous value. Silent data corruption with no error flag — the nastiest kind.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop6"> I can draw the texel layout for a scalar list and a 2-field struct.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop5">← Prev</button><button class="navbtn" data-goto="stop7">Next →</button></div>
+</section>
+
+<!-- ================= STOP 7 ================= -->
+<section class="card" id="stop7" data-title="7 · GLSL render path">
+  <h2>Stop 7 · GLSL render path — <span class="tag">strands_glslBackend.js</span></h2>
+  <p><strong>Declarations: turning a buffer name into samplers.</strong> <code>addStorageBufferBindingsToDeclarations()</code> runs at codegen time for every storage uniform: it adds <code>uniform sampler2D NAME;</code> plus <code>uniform int NAME_stride;</code> (and <code>uniform int NAME_count;</code> for lists) to <em>both</em> vertex and fragment declarations. A <code>sampler2D</code> is GLSL's handle for "a texture I can fetch from"; the stride/count uniforms are filled per draw as described in Stop 6. The first thing the function checks is whether the shader has <em>any</em> vertex/fragment hook (<code>shaderContext === 'vertex' || 'fragment'</code>). Compute-only shaders return early: their GLSL is generated but never compiled on the CPU path, so declaring samplers for them would be dead code at best and a confusing error source at worst.</p>
+  <p><strong>Reads: from <code>d[i]</code> to <code>texelFetch</code>.</strong> In the IR, every storage read is an <code>ARRAY_ACCESS</code> node (<code>buffer, index</code>, plus an optional field name for structs). <code>generateStorageRead()</code> matches only when the buffer resolves to a storage uniform via <code>storageInfoOf()</code> and the current stage is not compute; otherwise it returns <code>null</code> and the legacy path runs. The emitted code uses <code>texelFetch(sampler, ivec2(x, y), 0)</code>, which is WebGL2/GLSL3's "give me the exact texel at integer coordinates, no filtering" primitive (plain <code>texture()</code> would interpolate, which would corrupt data). Scalar element <code>i</code> becomes <code>texelFetch(n, ivec2((int(i)) % 256, (int(i)) / 256), 0).r</code>: index to 2D coords, take red. Struct field <code>f</code> of element <code>i</code> becomes <code>(i * n_stride + OFFSET)</code> as the linear texel, with a channel swizzle (<code>.r</code> for float, <code>.rgb</code> for vec3, multi-texel assembly for dim &gt; 4). Offsets are counted by summing <code>ceil(dim/4)</code> over preceding schema fields, mirroring <code>cpuStorageLayout()</code> exactly; if the two ever disagree, reads silently land on the wrong texel, so keep them in sync.</p>
+  <p><strong>Two deliberate errors.</strong> (1) WebGL1 has no <code>texelFetch</code>, so render-path reads fail fast with "needs WebGL2" while <code>compute()</code> itself keeps working on the CPU; the alternative would be cryptic link errors. (2) <code>push</code>/<code>pop</code> inside a render shader fail loudly (<code>generateStorageListCall</code> throws "cannot be used in vertex/fragment"), because appending from a parallel render pass has no sensible meaning; <code>length</code> instead compiles to the <code>(NAME_count)</code> uniform read, which is safe. Scalar int/uint reads get the <code>int()</code>/<code>uint()</code> wrap from Stop 4 here, at the <code>wrapScalar</code> step.</p>
+  <div class="predict"><strong>⏸ Predict:</strong> scalar read of element <code>i</code> from buffer <code>n</code> with stride uniform — write the emitted GLSL.
+    <br><button>Reveal</button>
+    <div class="answer"><code>texelFetch(n, ivec2((int(i)) % 256, (int(i)) / 256), 0).r</code> — and struct fields add <code>i * n_stride + OFFSET</code> with channel swizzles. Compare with the real output: <code>texelFetch(data, ivec2(((int(int(0)))) % 256, ((int(int(0)))) / 256), 0).r</code>.</div>
+  </div>
+  <label class="check"><input type="checkbox" data-stop="stop7"> I can explain why stride is a uniform but offsets are baked.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop6">← Prev</button><button class="navbtn" data-goto="stop8">Next →</button></div>
+</section>
+
+<!-- ================= STOP 8 ================= -->
+<section class="card" id="stop8" data-title="8 · Instances + tests">
+  <h2>Stop 8 · Instances and tests — <span class="tag">3d_primitives.js</span>, <span class="tag">p5.RendererGL.js suite</span></h2>
+  <p><strong>What instancing is.</strong> <code>model(geometry, count)</code> draws many copies of one shape in a single draw call; inside the shader, <code>instanceIndex</code> (0, 1, 2, …) tells each copy which data element to read, e.g. <code>let item = data[instanceIndex]</code>. On WebGPU, <code>count</code> can itself be a GPU storage list whose length is only known on the GPU, so p5 uses an <em>indirect</em> draw path (<code>_instanceList</code>): the GPU reads the count buffer to decide how many instances to launch.</p>
+  <p><strong>The CPU shortcut.</strong> A <code>CpuStorageList</code> is a plain JS array, so <code>list.items.length</code> is known synchronously on the CPU. The <code>instances()</code> change in <code>3d_primitives.js</code> checks <code>count._isCpuStorage</code>: if set, it takes the plain <code>_instanceCount = list.length</code> path (a normal instanced draw with a numeric count) instead of the indirect path. Same pixels, far less machinery, and no GPU-readable count buffer needed. Plain numbers still work exactly as before.</p>
+  <p><strong>What the 21 tests cover, grouped.</strong> (1) <em>Storage API parity:</em> count/array/typed/struct creation, <code>read</code> returns copies, <code>update/set/push/pop/clear</code> validation and bounds errors, int vs float preservation. (2) <em>Compute correctness:</em> the doubling kernel (<code>d[idx] = d[idx] * 2</code>), <code>index</code> mapping with 1D and 2D dispatch, function-form uniforms (<code>() =&gt; buf</code> re-resolved per dispatch, incl. the swap trick), branches and loops, Game of Life blinker one-step, a particle update, list <code>push</code> + <code>length</code> from inside the kernel. (3) <em>Driver behavior:</em> &gt;4096 dispatch warns but runs everything. (4) <em>Render integration:</em> filter-shader pixel output from CPU data, per-instance struct display, list-driven instancing. If you break something, run this suite first; the test names map one-to-one onto the stops above.</p>
+  <p class="foot">Two infra lessons from debugging: create canvases inside <code>setup()</code> (p5's async startup installs a default P2D canvas that <em>replaces</em> any canvas made earlier at module scope, so a <code>beforeEach</code> that sees RendererGL can still hand the test a Renderer2D; making the canvas in <code>setup()</code> runs after startup settles). And instance-mode shader callbacks need <code>{ myp5, ...vars }</code> scope objects: the transpiler resolves free names through the scope you pass, so omitting it makes every name resolve to nothing.</p>
+  <label class="check"><input type="checkbox" data-stop="stop8"> I know which test covers each feature.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop7">← Prev</button><button class="navbtn" data-goto="quiz">Quiz →</button></div>
+</section>
+
+<!-- ================= QUIZ ================= -->
+<section class="card" id="quiz" data-title="Quiz">
+  <h2>Calibration quiz</h2>
+  <p>Pick one. Explanations appear after you answer; score updates above.</p>
+
+  <div class="q" data-answer="b">
+    <p><strong>Q1.</strong> You call <code>buildComputeShader(simulate)</code> then <code>compute(s, 100)</code> on WebGL. How many times does the body of <code>simulate</code> execute on the CPU?</p>
+    <button class="opt" data-v="a">A · 100 times, once per index</button>
+    <button class="opt" data-v="b">B · Zero — it only ever builds IR</button>
+    <button class="opt" data-v="c">C · Once, to warm up the cache</button>
+    <div class="expl"><b>B.</b> The function is never "run" as logic; executing it while recording only constructs IR nodes. At <code>compute()</code> time the compiled JS from that IR runs instead. This is why a plain <code>for</code> loop over the callback could never work.</div>
+  </div>
+
+  <div class="q" data-answer="c">
+    <p><strong>Q2.</strong> <code>uniformStorage(() =&gt; cells)</code> passes a function. When is it called on the CPU path?</p>
+    <button class="opt" data-v="a">A · Once per invocation (per index)</button>
+    <button class="opt" data-v="b">B · At build time, and the result is frozen</button>
+    <button class="opt" data-v="c">C · Once per <code>compute()</code> call, during store resolution</button>
+    <div class="expl"><b>C.</b> Like GPU uniforms, values resolve per dispatch — which is exactly why the <code>[nextCells, cells] = [cells, nextCells]</code> swap trick keeps working: each <code>compute()</code> re-resolves to the current bindings.</div>
+  </div>
+
+  <div class="q" data-answer="a">
+    <p><strong>Q3.</strong> In the Game of Life test, plain <code>let n / alive / out</code> locals need no declarations or phi nodes in the generated code. Why?</p>
+    <button class="opt" data-v="a">A · Scalar temps are memoized by node ID; straight-line rebinding needs no phi</button>
+    <button class="opt" data-v="b">B · The backend hoists all locals to function scope</button>
+    <button class="opt" data-v="c">C · <code>let</code> locals are unsupported and silently dropped</button>
+    <div class="expl"><b>A.</b> Plain JS rebinding just points the variable at a newer node; only values that merge across branches (phi) or cross into storage need explicit handling. Straight-line scalars evaluate and vanish.</div>
+  </div>
+
+  <div class="q" data-answer="b">
+    <p><strong>Q4.</strong> Why warn instead of cap when dispatch exceeds 4096 items?</p>
+    <button class="opt" data-v="a">A · Capping is slower than warning</button>
+    <button class="opt" data-v="b">B · Silently dropping invocations corrupts simulations (e.g. Game of Life needs every cell)</button>
+    <button class="opt" data-v="c">C · The GPU path also only warns</button>
+    <div class="expl"><b>B.</b> A cap changes results without telling anyone. Warn-and-run preserves correctness; reducing item counts belongs in examples/docs, visibly.</div>
+  </div>
+
+  <div class="q" data-answer="c">
+    <p><strong>Q5.</strong> <code>filter(displayShader)</code> with <code>uniformStorage</code> inside failed with a clear error before the render path landed. Which layer produced it, and why was a clear error the right call?</p>
+    <button class="opt" data-v="a">A · The driver; it should have auto-converted instead</button>
+    <button class="opt" data-v="b">B · The browser; nothing to do</button>
+    <button class="opt" data-v="c">C · The GLSL backend; the alternative was cryptic invalid GLSL at link time</button>
+    <div class="expl"><b>C.</b> Without a binding, codegen would emit references to undeclared identifiers and die deep in GL compile logs. Failing fast at codegen with the reason attached is strictly better. (Now replaced by the texture path.)</div>
+  </div>
+
+  <div class="q" data-answer="a">
+    <p><strong>Q6.</strong> Your filter test failed with all-black output, but the bug was a missing <code>filterColor.end()</code> in the <em>test</em>. What does that teach about hooks?</p>
+    <button class="opt" data-v="a">A · Without <code>end()</code> the hook never finalizes, so the default hook renders silently</button>
+    <button class="opt" data-v="b">B · Missing <code>end()</code> throws at build time</button>
+    <button class="opt" data-v="c">C · <code>end()</code> is optional when using <code>set()</code></button>
+    <div class="expl"><b>A.</b> No finalize, no hook entry, no error — the base shader renders as if you never called <code>modify</code>. Silent no-ops like this are why the walkthrough says: when output looks "default", check your <code>begin/end</code> pairing first.</div>
+  </div>
+
+  <p><button class="navbtn" id="resetQuiz">Reset quiz</button></p>
+  <label class="check"><input type="checkbox" data-stop="quiz"> I scored 5+ (or re-read the stops I missed).</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stop8">← Stops</button><button class="navbtn" data-goto="stories">Stories →</button></div>
+</section>
+
+<!-- ================= STORIES ================= -->
+<section class="card" id="stories" data-title="War stories">
+  <h2>War stories (how each bug was actually found)</h2>
+  <div class="story"><h4>1. The method exists but the guard throws</h4><p>RendererGL <em>had</em> <code>createStorage</code>, yet tests threw "WebGPU only". Probing showed <code>beforeEach</code> saw RendererGL while the test saw Renderer2D: p5 installs a default P2D canvas during async startup, <em>replacing</em> the earlier canvas. Fix: create canvases in <code>setup()</code>. Lesson: when the object is right in one place and wrong in another, suspect lifecycle, not logic.</p></div>
+  <div class="story"><h4>2. <code>let t = t</code></h4><p>Temps self-referenced because the name was recorded <em>before</em> emitting the expression, so lookup returned the name itself. The GLSL backend emits first and names after. One-line fix, found by dumping the generated function.</p></div>
+  <div class="story"><h4>3. Loops that never loop</h4><p>Two codegen loops tested <code>sorted.length</code> on a <code>{blocks, types}</code> wrapper — always <code>undefined</code>, so branch/scope discovery silently did nothing. No error, just wrong code. Lesson: wrappers without <code>.length</code> fail open in comparisons.</p></div>
+  <div class="story"><h4>4. Black textures, no GL error</h4><p>Upload, binding, shader, and fetch all verified correct — yet black. Root cause was host-side pixel-store state (premultiplied alpha), invisible to every GL check. Lesson: when the GPU pipeline is proven right piece by piece, look at the state <em>around</em> the calls.</p></div>
+  <div class="story"><h4>5. The missing <code>end()</code></h4><p>An all-black filter test triggered a deep investigation (transpiler! hooks! codegen!) before anyone noticed the test itself never called <code>end()</code>. The framework behaved exactly as designed — silently rendering the default hook. Lesson: reproduce with the smallest possible input (constant white) before theorizing.</p></div>
+  <label class="check"><input type="checkbox" data-stop="stories"> I can retell two of these from the symptom alone.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="quiz">← Quiz</button><button class="navbtn" data-goto="glossary">Glossary →</button></div>
+</section>
+
+<!-- ================= GLOSSARY ================= -->
+<section class="card" id="glossary" data-title="Glossary">
+  <h2>Glossary</h2>
+  <dl class="gloss">
+    <dt>IR</dt><dd>Intermediate representation: the recorded form of the shader callback, split into a DAG (math) and CFG (order).</dd>
+    <dt>DAG</dt><dd>Directed acyclic graph of value nodes (literals, variables, operations). Sharing inputs is fine; read/write positions need distinct nodes.</dd>
+    <dt>CFG</dt><dd>Control-flow graph of basic blocks (default, if_cond, for, scope, merge…). Determines execution/generation order.</dd>
+    <dt>PHI</dt><dd>A node merging values from different branches (declared in BRANCH blocks, assigned at branch ends).</dd>
+    <dt>Hook</dt><dd>A named injection point in a shader (e.g. <code>filterColor</code>, <code>iteration</code>); <code>begin/end</code> bracket recording.</dd>
+    <dt>Backend</dt><dd>Turns IR into executable form: WGSL/GLSL text, or (new) a JS function.</dd>
+    <dt>uniformStorage</dt><dd>Binds a storage buffer/list into a shader; accepts a buffer or a function returning one (re-resolved per dispatch).</dd>
+    <dt>texelFetch</dt><dd>GLSL3 direct texel read by integer coordinates — the primitive behind render-path storage reads.</dd>
+    <dt>stride / count</dt><dd>Dynamic uniforms describing packed texture layout (texels per element; live list length).</dd>
+  </dl>
+  <label class="check"><input type="checkbox" data-stop="glossary"> Done. I can now explain every line I would submit.</label>
+  <div class="prevnext"><button class="navbtn" data-goto="stories">← Stories</button><span></span></div>
+</section>
+</main>
+
+<script>
+(function () {
+  var stops = ['stop0','stop1','stop2','stop3','stop4','stop5','stop6','stop7','stop8','quiz','stories','glossary'];
+  var nav = document.getElementById('navbar');
+  var barfill = document.getElementById('barfill');
+  var barlabel = document.getElementById('barlabel');
+  var scoreEl = document.getElementById('score');
+  var checked = {};
+  try { checked = JSON.parse(localStorage.getItem('cpuFallbackProgress') || '{}'); } catch (e) { checked = {}; }
+
+  function save() {
+    try { localStorage.setItem('cpuFallbackProgress', JSON.stringify(checked)); } catch (e) {}
+  }
+  function refresh() {
+    var done = 0;
+    stops.forEach(function (id) {
+      var btn = document.querySelector('#navbar button[data-goto="' + id + '"]');
+      var isDone = !!checked[id];
+      if (isDone) done++;
+      if (btn) {
+        btn.classList.toggle('done', isDone);
+        btn.textContent = (isDone ? '✓ ' : '') + btn.getAttribute('data-label');
+      }
+    });
+    document.querySelectorAll('input[type="checkbox"][data-stop]').forEach(function (box) {
+      box.checked = !!checked[box.getAttribute('data-stop')];
+    });
+    barfill.style.width = Math.round((done / stops.length) * 100) + '%';
+    barlabel.textContent = done + ' / ' + stops.length + ' stops understood';
+  }
+  // build nav
+  stops.forEach(function (id) {
+    var sec = document.getElementById(id);
+    var label = sec ? sec.getAttribute('data-title') : id;
+    var b = document.createElement('button');
+    b.setAttribute('data-goto', id);
+    b.setAttribute('data-label', label);
+    b.textContent = label;
+    b.addEventListener('click', function () { go(id); });
+    nav.appendChild(b);
+  });
+  function go(id) {
+    var el = document.getElementById(id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    document.querySelectorAll('#navbar button').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-goto') === id);
+    });
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest('[data-goto]');
+    if (t && t.classList.contains('navbtn') || (e.target.closest && e.target.closest('.node[data-goto]'))) {
+      var el = e.target.closest('[data-goto]');
+      if (el) go(el.getAttribute('data-goto'));
+    }
+  });
+  // reveal buttons
+  document.querySelectorAll('.predict button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var ans = btn.parentElement.querySelector('.answer');
+      if (ans.classList.contains('show')) {
+        ans.classList.remove('show');
+        btn.textContent = 'Reveal';
+      } else {
+        ans.classList.add('show');
+        btn.textContent = 'Hide';
+      }
+    });
+  });
+  // checklist
+  document.querySelectorAll('input[type="checkbox"][data-stop]').forEach(function (box) {
+    box.addEventListener('change', function () {
+      checked[box.getAttribute('data-stop')] = box.checked;
+      save();
+      refresh();
+    });
+  });
+  // quiz
+  var score = 0, answered = 0, totalQ = document.querySelectorAll('.q').length;
+  function paintScore() { scoreEl.textContent = score + ' / ' + totalQ; }
+  document.querySelectorAll('.q').forEach(function (q) {
+    var answer = q.getAttribute('data-answer');
+    q.querySelectorAll('button.opt').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (q.classList.contains('done')) return;
+        var good = btn.getAttribute('data-v') === answer;
+        btn.classList.add(good ? 'picked-good' : 'picked-bad');
+        if (!good) {
+          var right = q.querySelector('button.opt[data-v="' + answer + '"]');
+          if (right) right.classList.add('picked-good');
+        } else {
+          score++;
+        }
+        answered++;
+        q.classList.add('done');
+        q.classList.add(good ? 'correct' : 'wrong');
+        q.querySelectorAll('button.opt').forEach(function (b) { b.disabled = true; });
+        paintScore();
+      });
+    });
+  });
+  document.getElementById('resetQuiz').addEventListener('click', function () {
+    score = 0; answered = 0;
+    document.querySelectorAll('.q').forEach(function (q) {
+      q.classList.remove('done', 'correct', 'wrong');
+      q.querySelectorAll('button.opt').forEach(function (b) {
+        b.classList.remove('picked-good', 'picked-bad');
+        b.disabled = false;
+      });
+    });
+    paintScore();
+  });
+  // index mapper widget
+  document.getElementById('wGo').addEventListener('click', function () {
+    var x = Math.max(1, parseInt(document.getElementById('wX').value, 10) || 1);
+    var y = Math.max(1, parseInt(document.getElementById('wY').value, 10) || 1);
+    var z = Math.max(1, parseInt(document.getElementById('wZ').value, 10) || 1);
+    var f = Math.max(0, parseInt(document.getElementById('wF').value, 10) || 0);
+    var ix = f % x;
+    var iy = Math.floor(f / x) % y;
+    var iz = Math.floor(f / (x * y));
+    document.getElementById('wOut').textContent =
+      'index = (' + ix + ', ' + iy + ', ' + iz + ')';
+  });
+  // keyboard nav
+  document.addEventListener('keydown', function (e) {
+    if (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox') return;
+    var current = 0;
+    stops.forEach(function (id, i) {
+      var r = document.getElementById(id).getBoundingClientRect();
+      if (r.top < window.innerHeight * 0.4) current = i;
+    });
+    if (e.key === 'ArrowRight') go(stops[Math.min(stops.length - 1, current + 1)]);
+    if (e.key === 'ArrowLeft') go(stops[Math.max(0, current - 1)]);
+  });
+  paintScore();
+  refresh();
+})();
+</script>
+</body>
+</html>

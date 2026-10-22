@@ -310,8 +310,23 @@ function strands(p5, fn) {
         // .......
         const hooksObject = generateShaderCode(strandsContext);
 
+        // The CPU compute fallback (`RendererGL.compute`) executes this same
+        // IR as JavaScript, so keep it on compute shaders. Only the reference
+        // is stored; the context object itself is still reset below.
+        const isComputeShader = this.shaderType === 'compute';
+        const cpuIR = isComputeShader
+          ? {
+              dag: strandsContext.dag,
+              cfg: strandsContext.cfg,
+              uniforms: [...strandsContext.uniforms],
+              hooks: [...strandsContext.hooks]
+            }
+          : undefined;
+
         // Call modify with the generated hooks object
-        return oldModify.call(this, hooksObject);
+        const modified = oldModify.call(this, hooksObject);
+        if (cpuIR) modified._cpuIR = cpuIR;
+        return modified;
       } else {
         return oldModify.call(this, shaderModifier);
       }

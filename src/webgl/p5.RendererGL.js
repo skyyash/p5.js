@@ -17,6 +17,8 @@ import { RGB, RGBA } from '../color/creating_reading';
 import { Image } from '../image/p5.Image';
 import { glslBackend } from './strands_glslBackend';
 import { getShaderHookTypes } from './shaderHookUtils';
+import { runCpuCompute } from '../strands/strands_jsBackend';
+import { cpuStorageTextureFor } from './cpuStorageTexture';
 
 import filterBaseVert from './shaders/filters/base.vert';
 import lightingShader from './shaders/lighting.glsl';
@@ -59,6 +61,229 @@ const defaultShaders = {
 };
 for (const key in defaultShaders) {
   defaultShaders[key] = webgl2CompatibilityShader + defaultShaders[key];
+}
+
+/**
+ * Infers a minimal struct schema for CPU storage from one example element.
+ * Unlike the WebGPU schema (which also carries WGSL layout), the CPU schema
+ * only needs field names, component counts and JS kinds: the data stays as
+ * plain JS values and struct access in shaders maps to property access.
+ */
+function inferCpuStructSchema(firstElement) {
+  const fields = Object.entries(firstElement).map(([name, value]) => {
+    if (typeof value === 'number') {
+      return { name, dim: 1, kind: 'number' };
+    }
+    if (Array.isArray(value)) {
+      return { name, dim: value.length, kind: 'array' };
+    }
+    if (value?.isVector) {
+      return { name, dim: value.dimensions ?? 3, kind: 'vector' };
+    }
+    if (value?.isColor) {
+      return { name, dim: 4, kind: 'color' };
+    }
+    throw new Error(
+      `createStorage() field "${name}" must be a number, an array of numbers, ` +
+        'a p5.Vector or a p5.Color.'
+    );
+  });
+  return { fields };
+}
+
+function checkCpuStructShape(schema, data, method) {
+  const expected = schema.fields.map(f => `${f.name}:${f.dim}`).join(',');
+  data.forEach((item, i) => {
+    const actual = Object.entries(item)
+      .map(([name, value]) => {
+        const dim = Array.isArray(value)
+          ? value.length
+          : value?.isVector
+            ? (value.dimensions ?? 3)
+            : value?.isColor
+              ? 4
+              : 1;
+        return `${name}:${dim}`;
+      })
+      .join(',');
+    if (actual !== expected) {
+      throw new Error(
+        `${method}() data structure doesn't match the original.\n` +
+          `  Expected: ${expected}\n` +
+          `  Got (element ${i}): ${actual}`
+      );
+    }
+  });
+}
+
+/**
+ * CPU counterpart of the WebGPU `StorageBuffer`: holds data as plain JS
+ * values (typed arrays for number lists, arrays of objects for structs) so
+ * compute shaders can run without a GPU. Carries the same duck-type flags
+ * (`_isStorageBuffer`, `_schema`) that `uniformStorage()` looks for.
+ */
+class CpuStorageBuffer {
+  constructor(data, schema, arrayType, length) {
+    this._isStorageBuffer = true;
+    this._isCpuStorage = true;
+    this.data = data;
+    this.length = length ?? data.length;
+    this._schema = schema;
+    this._arrayType = arrayType ?? data.constructor;
+    // Bumped on every mutation so data textures re-upload. Compute passes
+    // bump versions for all bound stores after running (see strands_jsBackend).
+    this._cpuVersion = 0;
+  }
+
+  update(data) {
+    if (this._schema !== null) {
+      if (!Array.isArray(data) || data.length === 0 || typeof data[0] !== 'object') {
+        throw new Error(
+          'update() expects an array of objects matching the original struct format'
+        );
+      }
+      checkCpuStructShape(this._schema, data, 'update');
+      if (data.length > this.length) {
+        throw new Error(
+          `update() data length (${data.length}) exceeds buffer length (${this.length})`
+        );
+      }
+      this.data = data.slice();
+      this._cpuVersion += 1;
+    } else {
+      const ArrayType = this._arrayType;
+      let typedData;
+      if (data instanceof ArrayType) {
+        typedData = data.slice();
+      } else if (Array.isArray(data)) {
+        typedData = new ArrayType(data);
+      } else if (ArrayBuffer.isView(data)) {
+        typedData = new ArrayType(data);
+      } else {
+        throw new Error(
+          `update() expects a ${ArrayType.name} or array of numbers for this buffer`
+        );
+      }
+      if (typedData.length > this.length) {
+        throw new Error(
+          `update() data length (${typedData.length}) exceeds buffer length (${this.length})`
+        );
+      }
+      this.data = typedData;
+      this._cpuVersion += 1;
+    }
+  }
+
+  set(index, value) {
+    if (index < 0 || index >= this.length) {
+      throw new Error(
+        `set() index ${index} is out of bounds for this buffer (length ${this.length})`
+      );
+    }
+    if (this._schema !== null) {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        throw new Error(
+          'set() expects a plain object matching the original struct format for this buffer'
+        );
+      }
+      checkCpuStructShape(this._schema, [value], 'set');
+      this.data[index] = value;
+      this._cpuVersion += 1;
+    } else {
+      if (typeof value !== 'number') {
+        throw new Error('set() expects a number for this float buffer');
+      }
+      this.data[index] = value;
+      this._cpuVersion += 1;
+    }
+  }
+
+  async read() {
+    if (this._schema !== null) {
+      return this.data.map(item => ({ ...item }));
+    }
+    return this.data.slice();
+  }
+}
+
+/**
+ * CPU counterpart of the WebGPU `StorageList`: a variable-length list that
+ * compute shaders can `push()` to. Backed by a plain JS array.
+ */
+class CpuStorageList {
+  constructor(maxCapacity, schema = null, initialItems = []) {
+    this._isStorageList = true;
+    this._isCpuStorage = true;
+    this.maxCapacity = maxCapacity;
+    this._schema = schema;
+    this.items = initialItems.slice();
+    this._cpuVersion = 0;
+  }
+
+  get length() {
+    return this.items.length;
+  }
+
+  clear() {
+    this.items.length = 0;
+    this._cpuVersion += 1;
+  }
+
+  push(element) {
+    if (this.items.length >= this.maxCapacity) {
+      throw new Error(
+        `StorageList is full (maxCapacity: ${this.maxCapacity})`
+      );
+    }
+    if (this._schema) {
+      if (typeof element !== 'object' || element === null || Array.isArray(element)) {
+        throw new Error(
+          'StorageList.push() expects a plain object matching the list schema.'
+        );
+      }
+      checkCpuStructShape(this._schema, [element], 'push');
+      this.items.push({ ...element });
+      this._cpuVersion += 1;
+    } else {
+      if (typeof element !== 'number') {
+        throw new Error('Float StorageList.push() expects a number');
+      }
+      this.items.push(element);
+      this._cpuVersion += 1;
+    }
+  }
+
+  update(data) {
+    if (this._schema) {
+      if (!Array.isArray(data) || data.length === 0 || typeof data[0] !== 'object') {
+        throw new Error('update() expects an array of objects matching the list schema');
+      }
+      if (data.length > this.maxCapacity) {
+        throw new Error(
+          `update() data length ${data.length} exceeds maxCapacity ${this.maxCapacity}`
+        );
+      }
+      checkCpuStructShape(this._schema, data, 'update');
+      this.items = data.map(item => ({ ...item }));
+      this._cpuVersion += 1;
+    } else {
+      const items = Array.from(data);
+      if (items.length > this.maxCapacity) {
+        throw new Error(
+          `update() data length ${items.length} exceeds maxCapacity ${this.maxCapacity}`
+        );
+      }
+      this.items = items;
+      this._cpuVersion += 1;
+    }
+  }
+
+  async read() {
+    if (this._schema) {
+      return this.items.map(item => ({ ...item }));
+    }
+    return new Float32Array(this.items);
+  }
 }
 
 /**
@@ -732,6 +957,23 @@ class RendererGL extends Renderer3D {
     return super.baseMaterialShader();
   }
 
+  /**
+   * Returns the default shader used for compute operations on the CPU
+   * fallback path. Like the WebGPU version it exposes a single `iteration`
+   * hook whose `index` parameter counts invocations; the hook source is
+   * never compiled to GLSL, it only gives Strands hook type information.
+   */
+  baseComputeShader() {
+    if (!this._baseComputeShader) {
+      this._baseComputeShader = new Shader(this, 'void main() {}', {
+        compute: {
+          'void iteration': '(ivec3 index) {}'
+        }
+      });
+    }
+    return this._baseComputeShader;
+  }
+
   // useTextureMaps compiles a second phong variant with the mtl texture-map
   // code switched on via a #define. plain lit scenes keep getting the original
   // shader with none of that compiled in, so they pay nothing for the feature.
@@ -1243,6 +1485,40 @@ class RendererGL extends Renderer3D {
     tex.bindTexture();
     tex.update();
     gl.uniform1i(uniform.location, uniform.samplerIndex);
+    if (tex._isCpuStorageTexture) {
+      this._setCpuStorageLayoutUniforms(uniform, tex);
+    }
+  }
+
+  /**
+   * Sets the `stride` (and `count`, for lists) uniforms that accompany a CPU
+   * storage data texture. Locations are cached per program on the texture.
+   */
+  _setCpuStorageLayoutUniforms(uniform, tex) {
+    const gl = this.GL;
+    const program = this._curShader?._glProgram;
+    if (!program || !tex._layout) return;
+    let locs = tex._programLocs.get(program);
+    if (!locs) {
+      locs = {
+        stride: gl.getUniformLocation(program, `${uniform.name}_stride`),
+        count: gl.getUniformLocation(program, `${uniform.name}_count`)
+      };
+      tex._programLocs.set(program, locs);
+    }
+    if (locs.stride) gl.uniform1i(locs.stride, tex._layout.stride);
+    if (locs.count) gl.uniform1i(locs.count, tex._layout.count);
+  }
+
+  /**
+   * Routes CPU storage buffers to data textures so render shaders can read
+   * `uniformStorage()` data on WebGL. Everything else uses the shared cache.
+   */
+  getTexture(input) {
+    if (input?._isCpuStorage) {
+      return cpuStorageTextureFor(this, input);
+    }
+    return super.getTexture(input);
   }
 
   bindTexture(tex) {
@@ -2030,6 +2306,69 @@ class RendererGL extends Renderer3D {
       }
       this.bindFramebuffer(prevFramebuffer);
     }
+  }
+
+  /**
+   * Creates CPU-backed storage for the compute fallback: a number creates a
+   * zero-filled list of that length, otherwise data is copied in. Struct
+   * data (arrays of objects) keeps plain JS values, so no GPU packing
+   * happens here. Mirrors `RendererWebGPU.createStorage` validation.
+   */
+  createStorage(dataOrCount) {
+    if (Array.isArray(dataOrCount) && dataOrCount.length > 0) {
+      const first = dataOrCount[0];
+      if (typeof first === 'object' && first !== null && !Array.isArray(first)) {
+        const schema = inferCpuStructSchema(first);
+        return new CpuStorageBuffer(dataOrCount.slice(), schema, Float32Array, dataOrCount.length);
+      }
+    }
+
+    let initialData;
+    if (typeof dataOrCount === 'number') {
+      initialData = new Float32Array(dataOrCount);
+    } else if (ArrayBuffer.isView(dataOrCount) && !(dataOrCount instanceof DataView)) {
+      initialData = new dataOrCount.constructor(dataOrCount);
+    } else if (Array.isArray(dataOrCount)) {
+      initialData = new Float32Array(dataOrCount);
+    } else {
+      throw new Error('createStorage expects a number or array/TypedArray');
+    }
+    return new CpuStorageBuffer(initialData, null, initialData.constructor, initialData.length);
+  }
+
+  /**
+   * Creates a CPU-backed variable-length list for the compute fallback.
+   * Mirrors `RendererWebGPU.createStorageList` without any GPU buffers.
+   */
+  createStorageList(maxCapacity, schemaOrData) {
+    let schema = null;
+    let initialItems = [];
+
+    if (
+      Array.isArray(schemaOrData) &&
+      schemaOrData.length > 0 &&
+      typeof schemaOrData[0] === 'object' &&
+      !Array.isArray(schemaOrData[0])
+    ) {
+      schema = inferCpuStructSchema(schemaOrData[0]);
+      initialItems = schemaOrData.slice();
+    } else if (
+      schemaOrData !== undefined &&
+      typeof schemaOrData === 'object' &&
+      !Array.isArray(schemaOrData)
+    ) {
+      schema = inferCpuStructSchema(schemaOrData);
+    }
+
+    return new CpuStorageList(maxCapacity, schema, initialItems);
+  }
+
+  /**
+   * Runs a compute shader on the CPU fallback path. Signature matches the
+   * WebGPU `compute(shader, x, y, z)` so user code stays unchanged.
+   */
+  compute(shader, x, y = 1, z = 1) {
+    runCpuCompute(shader, x, y, z);
   }
 }
 
